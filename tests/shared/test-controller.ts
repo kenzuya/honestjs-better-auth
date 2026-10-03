@@ -1,20 +1,20 @@
-import { Body, Controller, Get, Post, Request } from "@nestjs/common";
+import { Body, Controller, Get, Post, Var } from "@kenzuya/honest";
+import type { UserSession } from "../../src/auth-guard.ts";
 import {
-	OptionalAuth,
 	AllowAnonymous,
+	OptionalAuth,
+	OrgRoles,
 	RequireActiveOrg,
 	Roles,
-	OrgRoles,
+	Session,
 } from "../../src/decorators.ts";
-import type { UserSession } from "../../src/auth-guard.ts";
-import type { Request as ExpressRequest } from "express";
 
 // Simple controller with one protected route and one public route
 @Controller("test")
 export class TestController {
 	@Get("protected")
-	protected(@Request() req: { user?: unknown }) {
-		return { user: req.user };
+	protected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@AllowAnonymous()
@@ -25,83 +25,55 @@ export class TestController {
 
 	@OptionalAuth()
 	@Get("optional")
-	optional(@Request() req: UserSession) {
-		return { authenticated: !!req.user, session: req.session };
-	}
-
-	@AllowAnonymous()
-	@Post("echo-body")
-	echoBody(@Request() req: { body?: unknown; rawBody?: Buffer }) {
-		return {
-			body: req.body ?? null,
-			rawBody: req.rawBody?.toString("utf8") ?? null,
-		};
+	optional(@Session() session: UserSession | null) {
+		return { authenticated: !!session?.user, session };
 	}
 
 	@Roles(["admin"])
 	@Get("admin-protected")
-	adminProtected(@Request() req: UserSession) {
-		return { user: req.user };
+	adminProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@Roles(["admin", "moderator"])
 	@Get("admin-moderator-protected")
-	adminModeratorProtected(@Request() req: UserSession) {
-		return { user: req.user };
+	adminModeratorProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@RequireActiveOrg()
 	@Get("active-org-protected")
-	activeOrgProtected(@Request() req: UserSession) {
-		return { user: req.user, session: req.session };
+	activeOrgProtected(@Session() session: UserSession) {
+		return { user: session.user, session };
 	}
 
 	@OrgRoles(["owner"])
 	@Get("org-owner-protected")
-	orgOwnerProtected(@Request() req: UserSession) {
-		return { user: req.user };
+	orgOwnerProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@OrgRoles(["owner", "admin"])
 	@Get("org-owner-admin-protected")
-	orgOwnerAdminProtected(@Request() req: UserSession) {
-		return { user: req.user };
+	orgOwnerAdminProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@OrgRoles(["admin"])
 	@Get("org-admin-protected")
-	orgAdminProtected(@Request() req: UserSession) {
-		return { user: req.user };
+	orgAdminProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@OrgRoles(["member"])
 	@Get("org-member-protected")
-	orgMemberProtected(@Request() req: UserSession) {
-		return { user: req.user };
-	}
-
-	@AllowAnonymous()
-	@Post("raw-body")
-	rawBody(@Request() req: ExpressRequest & { rawBody?: Buffer }) {
-		return {
-			hasRawBody: !!req.rawBody,
-			rawBodyType: req.rawBody ? typeof req.rawBody : null,
-			isBuffer: req.rawBody instanceof Buffer,
-		};
+	orgMemberProtected(@Var("user") user: unknown) {
+		return { user };
 	}
 
 	@AllowAnonymous()
 	@Post("json-body")
 	jsonBody(@Body() body: unknown) {
-		return {
-			hasBody: body !== undefined,
-			body: body ?? null,
-		};
-	}
-
-	@AllowAnonymous()
-	@Post("form-body")
-	formBody(@Body() body: unknown) {
 		return {
 			hasBody: body !== undefined,
 			body: body ?? null,
@@ -113,7 +85,7 @@ export class TestController {
 @Controller("active-org-controller")
 export class ActiveOrgController {
 	@Get("projects")
-	projects(@Request() req: UserSession) {
-		return { user: req.user, session: req.session };
+	projects(@Session() session: UserSession) {
+		return { user: session.user, session };
 	}
 }

@@ -1,26 +1,16 @@
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { faker } from "@faker-js/faker";
-import { Test } from "@nestjs/testing";
-import {
-	Controller,
-	Get,
-	Inject,
-	Module,
-	Req,
-	type INestApplication,
-} from "@nestjs/common";
+import { Controller, Get, Req } from "@kenzuya/honest";
 import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins/bearer";
 import { username } from "better-auth/plugins/username";
 import { admin } from "better-auth/plugins/admin";
+import type { Hono, HonoRequest } from "hono";
 import { Session } from "../../src/decorators.ts";
-import { AuthModule, AuthService } from "../../src/index.ts";
-import {
-	createTestHttpAdapter,
-	initTestApplication,
-} from "../shared/http-adapter.ts";
+import { AuthService } from "../../src/index.ts";
 import type { UserSession } from "../../src/auth-guard.ts";
-import { fromNodeHeaders } from "better-auth/node";
+import request from "../shared/request.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
 function createAuthWithUsername() {
 	return betterAuth({
@@ -34,10 +24,7 @@ type AuthWithUsername = ReturnType<typeof createAuthWithUsername>;
 
 @Controller("session-test")
 class SessionTestController {
-	constructor(
-		@Inject(AuthService)
-		private readonly authService: AuthService<AuthWithUsername>,
-	) {}
+	constructor(private readonly authService: AuthService<AuthWithUsername>) {}
 
 	@Get("session")
 	getSession(@Session() session: UserSession<AuthWithUsername>) {
@@ -50,10 +37,10 @@ class SessionTestController {
 	@Get("compare")
 	async compareSessionSources(
 		@Session() session: UserSession<AuthWithUsername>,
-		@Req() req: { headers: Record<string, string | string[] | undefined> },
+		@Req() req: HonoRequest,
 	) {
 		const apiSession = await this.authService.api.getSession({
-			headers: fromNodeHeaders(req.headers),
+			headers: req.raw.headers,
 		});
 
 		return {
@@ -70,29 +57,15 @@ class SessionTestController {
 }
 
 describe("session custom fields e2e", () => {
-	let app: INestApplication;
+	let hono: Hono;
 	let auth: AuthWithUsername;
 
 	beforeAll(async () => {
 		auth = createAuthWithUsername();
 
-		@Module({
-			imports: [AuthModule.forRoot({ auth })],
+		({ hono } = await createAuthTestApp(auth, {
 			controllers: [SessionTestController],
-		})
-		class TestAppModule {}
-
-		const moduleRef = await Test.createTestingModule({
-			imports: [TestAppModule],
-		}).compile();
-
-		const adapter = createTestHttpAdapter();
-		app = moduleRef.createNestApplication(adapter, { bodyParser: false });
-		await initTestApplication(app);
-	});
-
-	afterAll(async () => {
-		await app.close();
+		}));
 	});
 
 	it("should include username plugin fields in @Session() output", async () => {
@@ -107,7 +80,7 @@ describe("session custom fields e2e", () => {
 			},
 		});
 
-		const response = await request(app.getHttpServer())
+		const response = await request(hono)
 			.get("/session-test/session")
 			.set("Authorization", `Bearer ${signUp.token}`)
 			.expect(200);
@@ -133,7 +106,7 @@ describe("session custom fields e2e", () => {
 			},
 		});
 
-		const response = await request(app.getHttpServer())
+		const response = await request(hono)
 			.get("/session-test/session")
 			.set("Authorization", `Bearer ${signUp.token}`)
 			.expect(200);
@@ -156,7 +129,7 @@ describe("session custom fields e2e", () => {
 			},
 		});
 
-		const response = await request(app.getHttpServer())
+		const response = await request(hono)
 			.get("/session-test/compare")
 			.set("Authorization", `Bearer ${signUp.token}`)
 			.expect(200);

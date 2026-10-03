@@ -1,19 +1,15 @@
 import "reflect-metadata";
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { faker } from "@faker-js/faker";
-import { Module, Injectable, type INestApplication } from "@nestjs/common";
-import { Test } from "@nestjs/testing";
+import { Service, type Application } from "@kenzuya/honest";
+import type { Hono } from "hono";
 import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins/bearer";
-import {
-	AuthModule,
-	DatabaseHook,
-	BeforeCreate,
-	AfterCreate,
-} from "../../src/index.ts";
-import { createTestNestApplication } from "../shared/test-utils.ts";
+import { DatabaseHook, BeforeCreate, AfterCreate } from "../../src/index.ts";
+import request from "../shared/request.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
-@Injectable()
+@Service()
 class DatabaseHookTrackerService {
 	calls: { hook: string; model: string; operation: string }[] = [];
 
@@ -29,7 +25,7 @@ class DatabaseHookTrackerService {
 }
 
 @DatabaseHook()
-@Injectable()
+@Service()
 class UserDatabaseHook {
 	constructor(private readonly tracker: DatabaseHookTrackerService) {}
 
@@ -45,7 +41,7 @@ class UserDatabaseHook {
 }
 
 @DatabaseHook()
-@Injectable()
+@Service()
 class SessionDatabaseHook {
 	constructor(private readonly tracker: DatabaseHookTrackerService) {}
 
@@ -56,7 +52,8 @@ class SessionDatabaseHook {
 }
 
 describe("database hooks e2e", () => {
-	let app: INestApplication;
+	let app: Application;
+	let hono: Hono;
 
 	beforeAll(async () => {
 		const auth = betterAuth({
@@ -66,32 +63,20 @@ describe("database hooks e2e", () => {
 			databaseHooks: {},
 		});
 
-		@Module({
-			imports: [AuthModule.forRoot({ auth })],
-			providers: [
+		({ app, hono } = await createAuthTestApp(auth, {
+			services: [
 				DatabaseHookTrackerService,
 				UserDatabaseHook,
 				SessionDatabaseHook,
 			],
-		})
-		class AppModule {}
-
-		const moduleRef = await Test.createTestingModule({
-			imports: [AppModule],
-		}).compile();
-
-		app = await createTestNestApplication(moduleRef);
-	});
-
-	afterAll(async () => {
-		await app.close();
+		}));
 	});
 
 	it("should call @BeforeCreate('user') on sign-up", async () => {
-		const tracker = app.get(DatabaseHookTrackerService);
+		const tracker = app.getContainer().resolve(DatabaseHookTrackerService);
 		const before = tracker.getCalls("before", "user", "create").length;
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({
@@ -107,10 +92,10 @@ describe("database hooks e2e", () => {
 	});
 
 	it("should call @AfterCreate('user') on sign-up", async () => {
-		const tracker = app.get(DatabaseHookTrackerService);
+		const tracker = app.getContainer().resolve(DatabaseHookTrackerService);
 		const before = tracker.getCalls("after", "user", "create").length;
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({
@@ -124,10 +109,10 @@ describe("database hooks e2e", () => {
 	});
 
 	it("should call @AfterCreate('session') on sign-up", async () => {
-		const tracker = app.get(DatabaseHookTrackerService);
+		const tracker = app.getContainer().resolve(DatabaseHookTrackerService);
 		const before = tracker.getCalls("after", "session", "create").length;
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({
@@ -143,12 +128,12 @@ describe("database hooks e2e", () => {
 	});
 
 	it("should support dependency injection in database hook providers", async () => {
-		const tracker = app.get(DatabaseHookTrackerService);
+		const tracker = app.getContainer().resolve(DatabaseHookTrackerService);
 		expect(tracker).toBeInstanceOf(DatabaseHookTrackerService);
 
 		const beforeCount = tracker.calls.length;
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({
@@ -172,21 +157,11 @@ describe("database hooks configuration validation", () => {
 			// intentionally DO NOT set databaseHooks: {}
 		});
 
-		@Module({
-			imports: [AuthModule.forRoot({ auth })],
-			providers: [DatabaseHookTrackerService, UserDatabaseHook],
-		})
-		class AppModule {}
-
-		const moduleRef = await Test.createTestingModule({
-			imports: [AppModule],
-		}).compile();
-
-		const app = await createTestNestApplication(moduleRef, {
-			initialize: false,
-		});
-
-		await expect(app.init()).rejects.toThrow(
+		await expect(
+			createAuthTestApp(auth, {
+				services: [DatabaseHookTrackerService, UserDatabaseHook],
+			}),
+		).rejects.toThrow(
 			/@DatabaseHook providers.*databaseHooks.*not configured/i,
 		);
 	});

@@ -1,16 +1,13 @@
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
+import request from "../shared/request.ts";
 import { faker } from "@faker-js/faker";
-import { Test } from "@nestjs/testing";
-import { Module, Controller, Get } from "@nestjs/common";
+import { Controller, Get, Var } from "@kenzuya/honest";
 import { bearer } from "better-auth/plugins/bearer";
 import { admin } from "better-auth/plugins/admin";
 import { createAccessControl } from "better-auth/plugins/access";
 import { betterAuth } from "better-auth";
-import { AuthModule } from "../../src/index.ts";
 import { UserHasPermission } from "../../src/decorators.ts";
-import { type OPTIONS_TYPE } from "../../src/auth-module-definition.ts";
-import { Request } from "@nestjs/common";
-import { createTestApplication } from "../shared/http-adapter.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
 // Create custom access control with project and sale resources
 const statement = {
@@ -73,28 +70,28 @@ function createTestAuthWithAccessControl() {
 class PermissionTestController {
 	@UserHasPermission({ permission: { project: ["create", "update"] } })
 	@Get("project-create-update")
-	projectCreateUpdate(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectCreateUpdate(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({ permission: { project: ["create"] } })
 	@Get("project-create-only")
-	projectCreateOnly(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectCreateOnly(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({ permission: { project: ["delete"] } })
 	@Get("project-delete")
-	projectDelete(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectDelete(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({
 		permissions: { project: ["create"], sale: ["create"] },
 	})
 	@Get("multi-resource")
-	multiResource(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	multiResource(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({
@@ -102,67 +99,38 @@ class PermissionTestController {
 		permission: { project: ["delete"] },
 	})
 	@Get("role-permission-check")
-	rolePermissionCheck(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	rolePermissionCheck(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({ permission: { project: ["share"] } })
 	@Get("project-share")
-	projectShare(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectShare(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({ permission: { user: ["ban"] } })
 	@Get("user-ban")
-	userBan(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	userBan(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@UserHasPermission({ permission: { project: ["read"] } })
 	@Get("project-read")
-	projectRead(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectRead(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 }
 
-// Create test app module
-function createPermissionTestAppModule(
-	async: boolean,
-	auth: ReturnType<typeof createTestAuthWithAccessControl>,
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-) {
-	const authModule = async
-		? AuthModule.forRootAsync({
-				useFactory: async () => ({ auth, ...options }),
-			})
-		: AuthModule.forRoot({ auth, ...options });
-
-	@Module({
-		imports: [authModule],
-		controllers: [PermissionTestController],
-	})
-	class AppModule {}
-
-	return AppModule;
-}
-
 // Factory function to create test app
-async function createPermissionTestApp(
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-	async = false,
-) {
+async function createPermissionTestApp() {
 	const auth = createTestAuthWithAccessControl();
-	const AppModule = createPermissionTestAppModule(async, auth, options);
 
-	const moduleRef = await Test.createTestingModule({
-		imports: [AppModule],
-	}).compile();
-
-	const app = await createTestApplication(moduleRef, {
-		bodyParser: false,
+	const testApp = await createAuthTestApp(auth, {
+		controllers: [PermissionTestController],
 	});
 
-	return { app, auth };
+	return { ...testApp, auth };
 }
 
 describe("UserHasPermission e2e", () => {
@@ -172,13 +140,9 @@ describe("UserHasPermission e2e", () => {
 		testSetup = await createPermissionTestApp();
 	});
 
-	afterAll(async () => {
-		await testSetup.app.close();
-	});
-
 	describe("Basic permission checks", () => {
 		it("should forbid access without authentication", async () => {
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-create-update")
 				.expect(401);
 		});
@@ -193,7 +157,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-create-update")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403)
@@ -220,7 +184,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/project-create-update")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -251,7 +215,7 @@ describe("UserHasPermission e2e", () => {
 			});
 
 			// projectEditor has ["create", "update"], so should have access to create-only route
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/project-create-only")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -281,7 +245,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-delete")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -305,7 +269,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/project-delete")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -334,7 +298,7 @@ describe("UserHasPermission e2e", () => {
 			});
 
 			// Should fail because "read" is not a valid permission in the statement
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-read")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -360,7 +324,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/multi-resource")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -388,7 +352,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/multi-resource")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -414,7 +378,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/role-permission-check")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -442,7 +406,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/role-permission-check")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -468,7 +432,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/project-share")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -496,7 +460,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-share")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -520,7 +484,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/user-ban")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -548,7 +512,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/user-ban")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -575,7 +539,7 @@ describe("UserHasPermission e2e", () => {
 			});
 
 			// Route requires both create AND update
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/permission-test/project-create-update")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -594,7 +558,7 @@ describe("UserHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/permission-test/project-create-only")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);

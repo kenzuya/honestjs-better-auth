@@ -1,20 +1,20 @@
 import "reflect-metadata";
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { faker } from "@faker-js/faker";
-import { Module, Injectable, type INestApplication } from "@nestjs/common";
-import { Test } from "@nestjs/testing";
+import { Service, type Application } from "@kenzuya/honest";
+import type { Hono } from "hono";
 import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins/bearer";
 import {
-	AuthModule,
 	Hook,
 	BeforeHook,
 	AfterHook,
 	type AuthHookContext,
 } from "../../src/index.ts";
-import { createTestNestApplication } from "../shared/test-utils.ts";
+import request from "../shared/request.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
-@Injectable()
+@Service()
 class HookTrackerService {
 	beforeCalls = 0;
 	afterCalls = 0;
@@ -29,7 +29,7 @@ class HookTrackerService {
 }
 
 @Hook()
-@Injectable()
+@Service()
 class SignUpBeforeHook {
 	constructor(private readonly tracker: HookTrackerService) {}
 
@@ -40,7 +40,7 @@ class SignUpBeforeHook {
 }
 
 @Hook()
-@Injectable()
+@Service()
 class SignUpAfterHook {
 	constructor(private readonly tracker: HookTrackerService) {}
 
@@ -51,7 +51,8 @@ class SignUpAfterHook {
 }
 
 describe("hooks e2e", () => {
-	let app: INestApplication;
+	let app: Application;
+	let hono: Hono;
 
 	beforeAll(async () => {
 		const auth = betterAuth({
@@ -62,21 +63,9 @@ describe("hooks e2e", () => {
 			hooks: {},
 		});
 
-		@Module({
-			imports: [AuthModule.forRoot({ auth })],
-			providers: [HookTrackerService, SignUpBeforeHook, SignUpAfterHook],
-		})
-		class AppModule {}
-
-		const moduleRef = await Test.createTestingModule({
-			imports: [AppModule],
-		}).compile();
-
-		app = await createTestNestApplication(moduleRef);
-	});
-
-	afterAll(async () => {
-		await app.close();
+		({ app, hono } = await createAuthTestApp(auth, {
+			services: [HookTrackerService, SignUpBeforeHook, SignUpAfterHook],
+		}));
 	});
 
 	it("should call @BeforeHook on matching route", async () => {
@@ -84,10 +73,10 @@ describe("hooks e2e", () => {
 		const password = faker.internet.password({ length: 10 });
 		const name = faker.person.fullName();
 
-		const tracker = app.get(HookTrackerService);
+		const tracker = app.getContainer().resolve(HookTrackerService);
 		expect(tracker.beforeCalls).toBe(0);
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({ name, email, password })
@@ -101,10 +90,10 @@ describe("hooks e2e", () => {
 		const password = faker.internet.password({ length: 10 });
 		const name = faker.person.fullName();
 
-		const tracker = app.get(HookTrackerService);
+		const tracker = app.getContainer().resolve(HookTrackerService);
 		const before = tracker.afterCalls;
 
-		await request(app.getHttpServer())
+		await request(hono)
 			.post("/api/auth/sign-up/email")
 			.set("Content-Type", "application/json")
 			.send({ name, email, password })
@@ -123,22 +112,10 @@ describe("hooks configuration validation", () => {
 			// intentionally DO NOT set hooks: {}
 		});
 
-		@Module({
-			imports: [AuthModule.forRoot({ auth })],
-			providers: [HookTrackerService, SignUpBeforeHook],
-		})
-		class AppModule {}
-
-		const moduleRef = await Test.createTestingModule({
-			imports: [AppModule],
-		}).compile();
-
-		const app = await createTestNestApplication(moduleRef, {
-			initialize: false,
-		});
-
-		await expect(app.init()).rejects.toThrow(
-			/@Hook providers.*hooks.*not configured/i,
-		);
+		await expect(
+			createAuthTestApp(auth, {
+				services: [HookTrackerService, SignUpBeforeHook],
+			}),
+		).rejects.toThrow(/@Hook providers.*hooks.*not configured/i);
 	});
 });

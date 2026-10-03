@@ -1,25 +1,13 @@
-import { createTestApp, type TestAppSetup } from "../shared/test-utils.ts";
+import { describe, expect, it } from "bun:test";
 import { faker } from "@faker-js/faker";
-import { InternalServerErrorException } from "@nestjs/common";
-import { MESSAGES } from "@nestjs/core/constants.js";
-import request from "supertest";
+import request from "../shared/request.ts";
+import { createTestApp } from "../shared/test-utils.ts";
 
 describe("options e2e", () => {
-	let testSetup: TestAppSetup | undefined;
-
-	afterEach(async () => {
-		if (!testSetup) return;
-
-		await testSetup.app.close();
-		testSetup = undefined;
-	});
-
 	it("should not find any auth routes if disableControllers is set", async () => {
-		testSetup = await createTestApp({ disableControllers: true });
+		const testSetup = await createTestApp({ disableControllers: true });
 
-		const httpServer = testSetup.app.getHttpServer();
-
-		const signUpResponse = await request(httpServer)
+		const signUpResponse = await request(testSetup.hono)
 			.post("/api/auth/sign-up/email")
 			.send({
 				name: faker.person.fullName(),
@@ -27,7 +15,7 @@ describe("options e2e", () => {
 				password: faker.internet.password({ length: 10 }),
 			});
 
-		const signInResponse = await request(httpServer)
+		const signInResponse = await request(testSetup.hono)
 			.post("/api/auth/sign-in/email")
 			.send({
 				email: faker.internet.email(),
@@ -38,159 +26,91 @@ describe("options e2e", () => {
 		expect(signInResponse.status).toBe(404);
 	});
 
+	it("should keep guarding routes when disableControllers is set", async () => {
+		const testSetup = await createTestApp({ disableControllers: true });
+
+		const signUp = await testSetup.auth.api.signUpEmail({
+			body: {
+				name: faker.person.fullName(),
+				email: faker.internet.email(),
+				password: faker.internet.password({ length: 10 }),
+			},
+		});
+
+		await request(testSetup.hono).get("/test/protected").expect(401);
+		await request(testSetup.hono)
+			.get("/test/protected")
+			.set("Authorization", `Bearer ${signUp.token}`)
+			.expect(200);
+	});
+
 	it("should gracefully handling a middleware throwing an uncaught error", async () => {
-		const error = new Error("uncaught");
-		const internalError = new InternalServerErrorException(error);
-
-		testSetup = await createTestApp({
+		const testSetup = await createTestApp({
 			middleware: () => {
-				throw error;
+				throw new Error("uncaught");
 			},
 		});
 
-		const httpServer = testSetup.app.getHttpServer();
-		const response = await request(httpServer).get("/api/auth/ok");
+		const response = await request(testSetup.hono).get("/api/auth/ok");
 
-		expect(response.status).toBe(internalError.getStatus());
-		expect(response.body).toEqual({
-			statusCode: internalError.getStatus(),
-			message: MESSAGES.UNKNOWN_EXCEPTION_MESSAGE,
+		expect(response.status).toBe(500);
+		expect(response.body).toMatchObject({
+			status: 500,
+			path: "/api/auth/ok",
 		});
 	});
 
-	it("should attach rawBody to request when bodyParser.rawBody is true", async () => {
-		testSetup = await createTestApp({
-			bodyParser: {
-				rawBody: true,
+	it("should run the middleware before the Better Auth handler", async () => {
+		const calls: string[] = [];
+		const testSetup = await createTestApp({
+			middleware: async (c, next) => {
+				calls.push(c.req.path);
+				await next();
+				c.res.headers.set("x-auth-middleware", "1");
 			},
 		});
 
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/raw-body")
-			.send({ test: "data" });
+		const response = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.expect(200);
 
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasRawBody: true,
-			rawBodyType: "object",
-			isBuffer: true,
-		});
+		expect(calls).toEqual(["/api/auth/ok"]);
+		expect(response.headers["x-auth-middleware"]).toBe("1");
+		expect(response.body).toEqual({ ok: true });
 	});
 
-	it("should still attach rawBody when using deprecated enableRawBodyParser", async () => {
-		testSetup = await createTestApp({
-			enableRawBodyParser: true,
+	it("should let the middleware answer instead of Better Auth", async () => {
+		const testSetup = await createTestApp({
+			middleware: async (c) => c.json({ blocked: true }, 403),
 		});
 
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/raw-body")
-			.send({ test: "data" });
+		const response = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.expect(403);
 
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasRawBody: true,
-			rawBodyType: "object",
-			isBuffer: true,
-		});
+		expect(response.body).toEqual({ blocked: true });
 	});
 
-	it("should not attach rawBody to request when rawBody is disabled", async () => {
-		testSetup = await createTestApp({
-			bodyParser: {
-				rawBody: false,
-			},
-		});
+	it("should leave request bodies of non-auth routes readable", async () => {
+		const testSetup = await createTestApp();
 
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/raw-body")
-			.send({ test: "data" });
-
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasRawBody: false,
-			rawBodyType: null,
-			isBuffer: false,
-		});
-	});
-
-	it("should allow disabling only the json parser", async () => {
-		testSetup = await createTestApp({
-			bodyParser: {
-				json: {
-					enabled: false,
-				},
-			},
-		});
-
-		const response = await request(testSetup.app.getHttpServer())
+		const response = await request(testSetup.hono)
 			.post("/test/json-body")
-			.send({ test: "data" });
+			.send({ test: "data" })
+			.expect(200);
 
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasBody: false,
-			body: null,
-		});
-	});
-
-	it("should allow disabling only the urlencoded parser", async () => {
-		testSetup = await createTestApp({
-			bodyParser: {
-				urlencoded: {
-					enabled: false,
-				},
-			},
-		});
-
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/form-body")
-			.type("form")
-			.send({ test: "data" });
-
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasBody: false,
-			body: null,
-		});
-	});
-
-	it("should allow customizing the json parser limit", async () => {
-		const largePayload = "x".repeat(150_000);
-
-		testSetup = await createTestApp({
-			bodyParser: {
-				json: {
-					limit: "300kb",
-				},
-			},
-		});
-
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/json-body")
-			.send({ payload: largePayload });
-
-		expect(response.status).toBe(201);
 		expect(response.body).toEqual({
 			hasBody: true,
-			body: {
-				payload: largePayload,
-			},
+			body: { test: "data" },
 		});
 	});
 
-	it("should keep supporting the deprecated disableBodyParser option", async () => {
-		testSetup = await createTestApp({
-			disableBodyParser: true,
+	it("should honor a custom Better Auth basePath", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: { basePath: "/auth/" },
 		});
 
-		const response = await request(testSetup.app.getHttpServer())
-			.post("/test/json-body")
-			.send({ hello: "world" });
-
-		expect(response.status).toBe(201);
-		expect(response.body).toEqual({
-			hasBody: false,
-			body: null,
-		});
+		await request(testSetup.hono).get("/auth/ok").expect(200);
+		await request(testSetup.hono).get("/api/auth/ok").expect(404);
 	});
 });

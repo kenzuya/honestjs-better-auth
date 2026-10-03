@@ -1,17 +1,14 @@
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
+import request from "../shared/request.ts";
 import { faker } from "@faker-js/faker";
-import { Test } from "@nestjs/testing";
-import { Module, Controller, Get } from "@nestjs/common";
+import { Controller, Get, Var } from "@kenzuya/honest";
 import { bearer } from "better-auth/plugins/bearer";
 import { organization } from "better-auth/plugins/organization";
 import { admin } from "better-auth/plugins/admin";
 import { createAccessControl } from "better-auth/plugins/access";
 import { betterAuth } from "better-auth";
-import { AuthModule } from "../../src/index.ts";
 import { MemberHasPermission } from "../../src/decorators.ts";
-import { type OPTIONS_TYPE } from "../../src/auth-module-definition.ts";
-import { Request } from "@nestjs/common";
-import { createTestApplication } from "../shared/http-adapter.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
 // Create custom access control with project and sale resources for organization
 const statement = {
@@ -81,93 +78,64 @@ function createTestAuthWithOrganizationAccessControl() {
 class MemberPermissionTestController {
 	@MemberHasPermission({ permissions: { project: ["create", "update"] } })
 	@Get("project-create-update")
-	projectCreateUpdate(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectCreateUpdate(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { project: ["create"] } })
 	@Get("project-create-only")
-	projectCreateOnly(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectCreateOnly(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { project: ["delete"] } })
 	@Get("project-delete")
-	projectDelete(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectDelete(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({
 		permissions: { project: ["create"], sale: ["create"] },
 	})
 	@Get("multi-resource")
-	multiResource(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	multiResource(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { project: ["share"] } })
 	@Get("project-share")
-	projectShare(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectShare(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { organization: ["update"] } })
 	@Get("org-update")
-	orgUpdate(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	orgUpdate(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { organization: ["delete"] } })
 	@Get("org-delete")
-	orgDelete(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	orgDelete(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 
 	@MemberHasPermission({ permissions: { project: ["read"] } })
 	@Get("project-read")
-	projectRead(@Request() req: { user?: unknown }) {
-		return { user: req.user, message: "success" };
+	projectRead(@Var("user") user: unknown) {
+		return { user, message: "success" };
 	}
 }
 
-// Create test app module
-function createMemberPermissionTestAppModule(
-	async: boolean,
-	auth: ReturnType<typeof createTestAuthWithOrganizationAccessControl>,
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-) {
-	const authModule = async
-		? AuthModule.forRootAsync({
-				useFactory: async () => ({ auth, ...options }),
-			})
-		: AuthModule.forRoot({ auth, ...options });
-
-	@Module({
-		imports: [authModule],
-		controllers: [MemberPermissionTestController],
-	})
-	class AppModule {}
-
-	return AppModule;
-}
-
 // Factory function to create test app
-async function createMemberPermissionTestApp(
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-	async = false,
-) {
+async function createMemberPermissionTestApp() {
 	const auth = createTestAuthWithOrganizationAccessControl();
-	const AppModule = createMemberPermissionTestAppModule(async, auth, options);
 
-	const moduleRef = await Test.createTestingModule({
-		imports: [AppModule],
-	}).compile();
-
-	const app = await createTestApplication(moduleRef, {
-		bodyParser: false,
+	const testApp = await createAuthTestApp(auth, {
+		controllers: [MemberPermissionTestController],
 	});
 
-	return { app, auth };
+	return { ...testApp, auth };
 }
 
 describe("MemberHasPermission e2e", () => {
@@ -175,10 +143,6 @@ describe("MemberHasPermission e2e", () => {
 
 	beforeAll(async () => {
 		testSetup = await createMemberPermissionTestApp();
-	});
-
-	afterAll(async () => {
-		await testSetup.app.close();
 	});
 
 	// Helper function to create org with member having specific role
@@ -237,7 +201,7 @@ describe("MemberHasPermission e2e", () => {
 
 	describe("Basic permission checks", () => {
 		it("should forbid access without authentication", async () => {
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-update")
 				.expect(401);
 		});
@@ -252,7 +216,7 @@ describe("MemberHasPermission e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-update")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403)
@@ -296,7 +260,7 @@ describe("MemberHasPermission e2e", () => {
 			});
 
 			// Owner role might not have project permissions, so this should fail
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-update")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -357,7 +321,7 @@ describe("MemberHasPermission e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/project-create-update")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -374,7 +338,7 @@ describe("MemberHasPermission e2e", () => {
 			const { memberSignUp } = await createOrgWithMember("projectEditor");
 
 			// projectEditor has ["create", "update"], so should have access to create-only route
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/project-create-only")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -389,7 +353,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should forbid access when member lacks required permission", async () => {
 			const { memberSignUp } = await createOrgWithMember("projectEditor"); // Has create, update but NOT delete
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-delete")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
@@ -398,7 +362,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should allow access when member has delete permission", async () => {
 			const { memberSignUp } = await createOrgWithMember("projectAdmin"); // Has create, update, delete
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/project-delete")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -412,7 +376,7 @@ describe("MemberHasPermission e2e", () => {
 			const { memberSignUp } = await createOrgWithMember("projectViewer"); // Has "share" but not "read"
 
 			// Should fail because "read" is not a valid permission in the statement
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-read")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
@@ -423,7 +387,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should allow access when member has all required permissions across resources", async () => {
 			const { memberSignUp } = await createOrgWithMember("multiResourceUser"); // Has project: ["create", "update"], sale: ["create"]
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/multi-resource")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -436,7 +400,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should forbid access when member lacks one of the required permissions", async () => {
 			const { memberSignUp } = await createOrgWithMember("projectEditor"); // Has project: ["create", "update"] but NOT sale: ["create"]
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/multi-resource")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
@@ -447,7 +411,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should allow access to share permission when member has it", async () => {
 			const { memberSignUp } = await createOrgWithMember("fullAccess"); // Has all permissions including share
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/project-share")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -460,7 +424,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should forbid access to share permission when member lacks it", async () => {
 			const { memberSignUp } = await createOrgWithMember("projectAdmin"); // Has create, update, delete but NOT share
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-share")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
@@ -469,7 +433,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should allow access to organization update permission when member has it", async () => {
 			const { memberSignUp } = await createOrgWithMember("orgAdmin"); // Has organization: ["update"]
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/org-update")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -482,7 +446,7 @@ describe("MemberHasPermission e2e", () => {
 		it("should forbid access to organization delete permission when member lacks it", async () => {
 			const { memberSignUp } = await createOrgWithMember("orgAdmin"); // Has organization: ["update"] but NOT delete
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/org-delete")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
@@ -494,7 +458,7 @@ describe("MemberHasPermission e2e", () => {
 			const { memberSignUp } = await createOrgWithMember("projectEditor"); // Has create and update
 
 			// Route requires both create AND update
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/member-permission-test/project-create-update")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -514,7 +478,7 @@ describe("MemberHasPermission e2e", () => {
 			});
 
 			// Don't create organization or set active org
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-only")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -553,7 +517,7 @@ describe("MemberHasPermission e2e", () => {
 			});
 
 			// Owner role might not have project permissions by default
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-only")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -613,7 +577,7 @@ describe("MemberHasPermission e2e", () => {
 			});
 
 			// Should have access with org1
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-only")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -652,7 +616,7 @@ describe("MemberHasPermission e2e", () => {
 			});
 
 			// Should NOT have access with org2 (different permissions)
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/member-permission-test/project-create-only")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);

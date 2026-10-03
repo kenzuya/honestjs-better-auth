@@ -20,6 +20,7 @@ class TestRequest implements PromiseLike<TestResponse> {
 	private readonly headers = new Headers();
 	private readonly expectations: Expectation[] = [];
 	private body: string | undefined;
+	private response: Promise<TestResponse> | undefined;
 	private contentType: "json" | "form" = "json";
 
 	constructor(
@@ -71,7 +72,9 @@ class TestRequest implements PromiseLike<TestResponse> {
 			| null,
 		onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
 	): PromiseLike<TResult1 | TResult2> {
-		return this.execute().then(onfulfilled, onrejected);
+		// Like supertest, the request is sent once however often the builder is awaited
+		this.response ??= this.execute();
+		return this.response.then(onfulfilled, onrejected);
 	}
 
 	private async execute(): Promise<TestResponse> {

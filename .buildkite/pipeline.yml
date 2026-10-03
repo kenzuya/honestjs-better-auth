@@ -1,0 +1,62 @@
+# Release pipeline for @kenzuya/honest-better-auth.
+# .buildkite/pipeline.yml is the default file of `buildkite-agent pipeline upload`, so the pipeline's
+# steps in Buildkite only need that command without arguments.
+# Releases only run for builds started from the Buildkite UI ("New Build"); see .buildkite/README.md.
+
+steps:
+  - input: ":rocket: Release @kenzuya/honest-better-auth"
+    key: release-input
+    if: build.source == "ui"
+    prompt: "Choose the version and npm dist-tag. Run a dry run first to check the result."
+    fields:
+      - select: "Version bump"
+        key: release-bump
+        hint: "Ignored when an exact version is set below."
+        default: patch
+        options:
+          - { label: "patch  (x.y.Z)", value: patch }
+          - { label: "minor  (x.Y.0)", value: minor }
+          - { label: "major  (X.0.0)", value: major }
+          - { label: "prepatch  (x.y.Z-<preid>.0)", value: prepatch }
+          - { label: "preminor  (x.Y.0-<preid>.0)", value: preminor }
+          - { label: "premajor  (X.0.0-<preid>.0)", value: premajor }
+          - { label: "prerelease  (bump the prerelease number)", value: prerelease }
+      - text: "Exact version"
+        key: release-version
+        hint: "Optional. Overrides the bump, for example 1.0.0 to publish the version in package.json as is, or 1.1.0-rc.1."
+        required: false
+      - text: "Prerelease id"
+        key: release-preid
+        hint: "Used by prepatch, preminor, premajor and prerelease."
+        default: beta
+        required: false
+      - select: "npm dist-tag"
+        key: release-dist-tag
+        hint: "auto publishes stable versions to latest and prereleases to next."
+        default: auto
+        options:
+          - { label: "auto", value: auto }
+          - { label: "latest", value: latest }
+          - { label: "next", value: next }
+          - { label: "beta", value: beta }
+      - select: "Mode"
+        key: release-mode
+        hint: "dry-run builds and runs npm publish --dry-run without pushing or publishing."
+        required: true
+        options:
+          - { label: "dry-run", value: dry-run }
+          - { label: "publish", value: publish }
+
+  - label: ":npm: Release"
+    key: release
+    if: build.source == "ui"
+    depends_on: release-input
+    command: bash .buildkite/scripts/release.sh
+    secrets:
+      - NPM_TOKEN
+      - GITHUB_PUSH_TOKEN
+    concurrency: 1
+    concurrency_group: kenzuya-honest-better-auth/npm-release
+    # Uncomment when the hosted Linux queue is not the cluster's default queue.
+    # agents:
+    #   queue: "<hosted-queue-key>"

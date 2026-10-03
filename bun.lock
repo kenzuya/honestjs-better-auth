@@ -10,7 +10,7 @@
         "@kenzuya/honest": "^0.1.23",
         "@tsconfig/node22": "^22.0.2",
         "@types/bun": "latest",
-        "better-auth": "^1.5.4",
+        "better-auth": "^1.7.7",
         "hono": "^4.12.8",
         "reflect-metadata": "^0.2.2",
         "typescript": "^5.9.3",
@@ -18,7 +18,7 @@
       },
       "peerDependencies": {
         "@kenzuya/honest": "^0.1.23",
-        "better-auth": ">=1.5.0 <2.0.0",
+        "better-auth": ">=1.7.0 <2.0.0",
         "hono": "^4.12.8",
         "reflect-metadata": "^0.2.2",
         "typescript": "^5.9.2 || ^6.0.0",

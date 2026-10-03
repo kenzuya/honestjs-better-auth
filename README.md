@@ -17,10 +17,10 @@ npm install @kenzuya/honest-better-auth @kenzuya/honest better-auth hono reflect
 ## Prerequisites
 
 > [!IMPORTANT]
-> Requires `better-auth` >= 1.5.0 and `@kenzuya/honest` 0.1.x.
+> Requires `better-auth` >= 1.7.0 and `@kenzuya/honest` 0.1.x.
 
 - A working Honest application
-- Better Auth (>= 1.5.0) installed and configured ([installation guide](https://www.better-auth.com/docs/installation))
+- Better Auth (>= 1.7.0) installed and configured ([installation guide](https://www.better-auth.com/docs/installation))
 - `"experimentalDecorators": true` and `"emitDecoratorMetadata": true` in your `tsconfig.json` (Honest's dependency injection needs them)
 
 ## Basic Setup

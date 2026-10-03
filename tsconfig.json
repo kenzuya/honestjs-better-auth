@@ -1,11 +1,15 @@
 {
 	"extends": "@tsconfig/node22/tsconfig.json",
 	"compilerOptions": {
-		"types": ["vitest/globals"],
+		"lib": ["ES2024", "DOM", "DOM.Iterable"],
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"types": ["bun"],
 		"emitDecoratorMetadata": true,
 		"experimentalDecorators": true,
 		"allowImportingTsExtensions": true,
 		"noEmit": true,
 		"declaration": true
-	}
+	},
+	"exclude": ["node_modules", "dist", "examples"]
 }

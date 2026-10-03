@@ -1,22 +1,25 @@
 import "reflect-metadata";
-import { Test, type TestingModule } from "@nestjs/testing";
-import { Module, type INestApplication } from "@nestjs/common";
-import { GraphQLModule } from "@nestjs/graphql";
-import { ApolloDriver, type ApolloDriverConfig } from "@nestjs/apollo";
-import type { Request, Response } from "express";
-import { bearer } from "better-auth/plugins/bearer";
-import { AuthModule } from "../../src/index.ts";
+import {
+	type HonestOptions,
+	NoopLogger,
+	createTestApplication,
+} from "@kenzuya/honest";
 import { betterAuth } from "better-auth";
-import { TestController } from "./test-controller.ts";
-import { TestResolver } from "./test-resolver.ts";
-import { TestGateway } from "./test-gateway.ts";
 import { admin } from "better-auth/plugins/admin";
 import { adminAc, userAc } from "better-auth/plugins/admin/access";
-import { type OPTIONS_TYPE } from "../../src/auth-module-definition.ts";
-import { createTestHttpAdapter, initTestApplication } from "./http-adapter.ts";
+import { bearer } from "better-auth/plugins/bearer";
+import {
+	AuthGuard,
+	BetterAuthPlugin,
+	type BetterAuthPluginOptions,
+} from "../../src/index.ts";
+import { ActiveOrgController, TestController } from "./test-controller.ts";
 
 type BetterAuthOptions = Parameters<typeof betterAuth>[0];
-type TestHttpAdapter = ReturnType<typeof createTestHttpAdapter>;
+// biome-ignore lint/suspicious/noExplicitAny: test modules can list any class
+type Constructor = new (...args: any[]) => unknown;
+
+export type TestPluginOptions = Omit<BetterAuthPluginOptions, "auth">;
 
 // Create Better Auth instance factory
 export function createTestAuth(authOptions?: Partial<BetterAuthOptions>) {
@@ -39,88 +42,73 @@ export function createTestAuth(authOptions?: Partial<BetterAuthOptions>) {
 	});
 }
 
-// Test app module factory
-export function createTestAppModule(
-	async: boolean,
-	auth: ReturnType<typeof createTestAuth>,
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-) {
-	const authModule = async
-		? AuthModule.forRootAsync({
-				useFactory: async () => ({ auth, ...options }),
-			})
-		: AuthModule.forRoot({ auth, ...options });
-
-	@Module({
-		imports: [
-			authModule,
-			GraphQLModule.forRoot<ApolloDriverConfig>({
-				driver: ApolloDriver,
-				autoSchemaFile: true,
-				path: "/graphql",
-				context: ({ req, res }: { req: Request; res: Response }) => ({
-					req,
-					res,
-				}),
-			}),
-		],
-		controllers: [TestController],
-		providers: [TestResolver, TestGateway],
-	})
-	class AppModule {}
-
-	return AppModule;
+export interface AuthTestAppOptions {
+	module?: Constructor;
+	controllers?: Constructor[];
+	services?: Constructor[];
+	pluginOptions?: TestPluginOptions;
+	/**
+	 * Register AuthGuard as a global guard (default true).
+	 */
+	globalGuard?: boolean;
+	appOptions?: HonestOptions;
 }
 
-// Factory function to create and configure a test NestJS application
+/**
+ * Creates a Honest test application with the BetterAuthPlugin and, by default, a global AuthGuard.
+ */
+export async function createAuthTestApp(
+	auth: unknown,
+	options: AuthTestAppOptions = {},
+) {
+	const { appOptions = {}, globalGuard = true } = options;
+
+	return createTestApplication({
+		module: options.module,
+		controllers: options.controllers,
+		services: options.services,
+		appOptions: {
+			logger: new NoopLogger(),
+			...appOptions,
+			plugins: [
+				new BetterAuthPlugin({ auth, ...options.pluginOptions }),
+				...(appOptions.plugins ?? []),
+			],
+			components: {
+				...appOptions.components,
+				guards: [
+					...(globalGuard ? [AuthGuard] : []),
+					...(appOptions.components?.guards ?? []),
+				],
+			},
+		},
+	});
+}
+
 export interface TestAppOptions {
 	globalPrefix?: string;
-	initialize?: boolean;
 	authOptions?: Partial<BetterAuthOptions>;
-	configureAdapter?: (adapter: TestHttpAdapter) => Promise<void> | void;
-}
-
-export async function createTestNestApplication(
-	moduleRef: TestingModule,
-	appOptions?: TestAppOptions,
-) {
-	const adapter = createTestHttpAdapter();
-
-	await appOptions?.configureAdapter?.(adapter);
-
-	const app = moduleRef.createNestApplication(adapter, {
-		bodyParser: false,
-	});
-
-	if (appOptions?.globalPrefix) {
-		app.setGlobalPrefix(appOptions.globalPrefix);
-	}
-
-	if (appOptions?.initialize !== false) {
-		await initTestApplication(app);
-	}
-
-	return app;
+	appOptions?: HonestOptions;
 }
 
 export async function createTestApp(
-	options?: Omit<typeof OPTIONS_TYPE, "auth">,
-	async = false,
+	options?: TestPluginOptions,
 	appOptions?: TestAppOptions,
 ) {
 	const auth = createTestAuth(appOptions?.authOptions);
-	const AppModule = createTestAppModule(async, auth, options);
 
-	const moduleRef = await Test.createTestingModule({
-		imports: [AppModule],
-	}).compile();
+	const testApp = await createAuthTestApp(auth, {
+		controllers: [TestController, ActiveOrgController],
+		pluginOptions: options,
+		appOptions: {
+			...appOptions?.appOptions,
+			...(appOptions?.globalPrefix && {
+				routing: { prefix: appOptions.globalPrefix },
+			}),
+		},
+	});
 
-	const app = await createTestNestApplication(moduleRef, appOptions);
-
-	return { app, auth };
+	return { ...testApp, auth };
 }
 
-export interface TestAppSetup {
-	app: INestApplication;
-	auth: ReturnType<typeof createTestAuth>;
-}
+export type TestAppSetup = Awaited<ReturnType<typeof createTestApp>>;

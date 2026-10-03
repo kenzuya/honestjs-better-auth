@@ -7,5 +7,5 @@
 - [ ] Addresses a real, reproducible problem (issue linked for non-trivial changes)
 - [ ] Used the project toolchain — **Bun** (not npm/yarn/pnpm)
 - [ ] `bun run check` passes (lint + format)
-- [ ] `bun run test` passes (Express + Fastify)
+- [ ] `bun run typecheck` and `bun run test` pass
 - [ ] I understand & can maintain every line — including any AI-assisted parts

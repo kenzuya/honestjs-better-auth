@@ -1,22 +1,25 @@
-import type {
-	CanActivate,
-	ContextType,
-	ExecutionContext,
-} from "@nestjs/common";
 import {
-	ForbiddenException,
-	Inject,
-	Injectable,
-	UnauthorizedException,
-} from "@nestjs/common";
-import { Reflector } from "@nestjs/core";
+	HONEST_PIPELINE_CONTROLLER_KEY,
+	HONEST_PIPELINE_HANDLER_KEY,
+	type IGuard,
+} from "@kenzuya/honest";
 import type { getSession } from "better-auth/api";
-import { fromNodeHeaders } from "better-auth/node";
+import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { AuthService } from "./auth-service.ts";
+import type { Auth } from "./better-auth-plugin.ts";
+import { getAllAndOverride } from "./metadata.ts";
 import {
-	type AuthModuleOptions,
-	MODULE_OPTIONS_TOKEN,
-} from "./auth-module-definition.ts";
-import { getRequestFromContext } from "./utils.ts";
+	MEMBER_HAS_PERMISSION_KEY,
+	OPTIONAL_KEY,
+	ORG_ROLES_KEY,
+	PUBLIC_KEY,
+	REQUIRE_ACTIVE_ORG_KEY,
+	ROLES_KEY,
+	SESSION_CONTEXT_KEY,
+	USER_CONTEXT_KEY,
+	USER_HAS_PERMISSION_KEY,
+} from "./symbols.ts";
 
 /**
  * Type representing a valid user session after authentication
@@ -54,147 +57,110 @@ export type UserSession<T = unknown> = T extends {
 			};
 		};
 
-const AuthErrorType = {
-	UNAUTHORIZED: "UNAUTHORIZED",
-	FORBIDDEN: "FORBIDDEN",
-} as const;
+const unauthorized = (message = "Unauthorized") =>
+	new HTTPException(401, { message });
+
+const forbidden = (message = "Insufficient permissions") =>
+	new HTTPException(403, { message });
 
 /**
- * Lazy-load WsException to make @nestjs/websockets an optional dependency
+ * Returns the route handler and controller class of the current request, which Honest records in
+ * the context before guards run. Metadata is read from them in that order.
  */
-// biome-ignore lint/suspicious/noExplicitAny: WsException type comes from optional @nestjs/websockets dependency
-let WsException: any;
-async function getWsException() {
-	if (!WsException) {
-		try {
-			WsException = (await import("@nestjs/websockets")).WsException;
-		} catch (_error) {
-			throw new Error(
-				"@nestjs/websockets is required for WebSocket support. Please install it: npm install @nestjs/websockets @nestjs/platform-socket.io",
-			);
-		}
-	}
-	return WsException;
+function getMetadataTargets(c: Context): (object | undefined)[] {
+	const controllerClass = c.get(HONEST_PIPELINE_CONTROLLER_KEY) as
+		| (new (
+				...args: unknown[]
+		  ) => unknown)
+		| undefined;
+	const handlerName = c.get(HONEST_PIPELINE_HANDLER_KEY) as
+		| string
+		| symbol
+		| undefined;
+	const handler =
+		controllerClass && handlerName !== undefined
+			? (controllerClass.prototype as Record<string | symbol, unknown>)[
+					handlerName
+				]
+			: undefined;
+
+	return [handler as object | undefined, controllerClass];
 }
 
-const AuthContextErrorMap: Record<
-	ContextType | "graphql",
-	Record<keyof typeof AuthErrorType, (args?: unknown) => Promise<Error>>
-> = {
-	http: {
-		UNAUTHORIZED: async (args) => {
-			if (args) return new UnauthorizedException(args);
-			return new UnauthorizedException();
-		},
-		FORBIDDEN: async (args) => {
-			if (args) return new ForbiddenException(args);
-			return new ForbiddenException("Insufficient permissions");
-		},
-	},
-	graphql: {
-		UNAUTHORIZED: async (args) => {
-			if (args) return new UnauthorizedException(args);
-			return new UnauthorizedException();
-		},
-		FORBIDDEN: async (args) => {
-			if (args) return new ForbiddenException(args);
-			return new ForbiddenException("Insufficient permissions");
-		},
-	},
-	ws: {
-		UNAUTHORIZED: async (args) => {
-			const WsExceptionClass = await getWsException();
-			return new WsExceptionClass(args ?? "UNAUTHORIZED");
-		},
-		FORBIDDEN: async (args) => {
-			const WsExceptionClass = await getWsException();
-			return new WsExceptionClass(args ?? "FORBIDDEN");
-		},
-	},
-	rpc: {
-		UNAUTHORIZED: async () => new Error("UNAUTHORIZED"),
-		FORBIDDEN: async () => new Error("FORBIDDEN"),
-	},
-};
+const guardServices = new WeakMap<AuthGuard, AuthService<Auth>>();
 
 /**
- * NestJS guard that handles authentication for protected routes
- * Can be configured with @AllowAnonymous() or @OptionalAuth() decorators to modify authentication behavior
+ * Returns the AuthService a guard uses, so the plugin can bind the auth instance to a guard the DI
+ * container created before the plugin ran. Not exported from the package.
  */
-@Injectable()
-export class AuthGuard implements CanActivate {
-	constructor(
-		@Inject(Reflector)
-		private readonly reflector: Reflector,
-		@Inject(MODULE_OPTIONS_TOKEN)
-		private readonly options: AuthModuleOptions,
-	) {}
+export function getAuthGuardService(guard: AuthGuard): AuthService<Auth> {
+	return guardServices.get(guard) as AuthService<Auth>;
+}
+
+/**
+ * Honest guard that handles authentication for protected routes.
+ * Register it globally with `components: { guards: [AuthGuard] }` or per controller/route with
+ * `@UseGuards(AuthGuard)`. Can be configured with @AllowAnonymous() or @OptionalAuth() decorators
+ * to modify authentication behavior.
+ */
+export class AuthGuard implements IGuard {
+	// The default keeps the constructor arity at 0; the BetterAuthPlugin registers a configured instance.
+	constructor(authService: AuthService<Auth> = new AuthService<Auth>()) {
+		guardServices.set(this, authService);
+	}
+
+	private get authService(): AuthService<Auth> {
+		return getAuthGuardService(this);
+	}
 
 	/**
 	 * Validates if the current request is authenticated
-	 * Attaches session and user information to the request object
-	 * Supports HTTP, GraphQL and WebSocket execution contexts
-	 * @param context - The execution context of the current request
-	 * @returns True if the request is authorized to proceed, throws an error otherwise
+	 * Stores the session and user in the context variables "session" and "user"
+	 * @param c - The Hono context of the current request
+	 * @returns True if the request is authorized to proceed, throws an HTTPException otherwise
 	 */
-	async canActivate(context: ExecutionContext): Promise<boolean> {
-		const request = await getRequestFromContext(context);
-		const session: UserSession | null = await this.options.auth.api.getSession({
-			headers: fromNodeHeaders(
-				request.headers || request?.handshake?.headers || [],
-			),
+	async canActivate(c: Context): Promise<boolean> {
+		const headers = c.req.raw.headers;
+		const session: UserSession | null = await this.authService.api.getSession({
+			headers,
 		});
 
-		request.session = session;
-		request.user = session?.user ?? null; // useful for observability tools like Sentry
+		c.set(SESSION_CONTEXT_KEY, session);
+		c.set(USER_CONTEXT_KEY, session?.user ?? null); // useful for observability tools like Sentry
 
-		const isPublic = this.reflector.getAllAndOverride<boolean>("PUBLIC", [
-			context.getHandler(),
-			context.getClass(),
-		]);
+		const targets = getMetadataTargets(c);
+
+		const isPublic = getAllAndOverride<boolean>(PUBLIC_KEY, targets);
 
 		if (isPublic) return true;
 
-		const isOptional = this.reflector.getAllAndOverride<boolean>("OPTIONAL", [
-			context.getHandler(),
-			context.getClass(),
-		]);
+		const isOptional = getAllAndOverride<boolean>(OPTIONAL_KEY, targets);
 
 		if (!session && isOptional) return true;
 
-		const ctxType = context.getType();
-		if (!session) throw await AuthContextErrorMap[ctxType].UNAUTHORIZED();
+		if (!session) throw unauthorized();
 
-		const headers = fromNodeHeaders(
-			request.headers || request?.handshake?.headers || [],
-		);
-
-		const requireActiveOrg = this.reflector.getAllAndOverride<boolean>(
-			"REQUIRE_ACTIVE_ORG",
-			[context.getHandler(), context.getClass()],
+		const requireActiveOrg = getAllAndOverride<boolean>(
+			REQUIRE_ACTIVE_ORG_KEY,
+			targets,
 		);
 
 		if (requireActiveOrg && !session.session?.activeOrganizationId) {
-			throw await AuthContextErrorMap[ctxType].FORBIDDEN({
-				message: "Active organization is required",
-			});
+			throw forbidden("Active organization is required");
 		}
 
 		// Check @Roles() - user.role only (admin plugin)
-		const requiredRoles = this.reflector.getAllAndOverride<string[]>("ROLES", [
-			context.getHandler(),
-			context.getClass(),
-		]);
+		const requiredRoles = getAllAndOverride<string[]>(ROLES_KEY, targets);
 
 		if (requiredRoles && requiredRoles.length > 0) {
 			const hasRole = this.checkUserRole(session, requiredRoles);
-			if (!hasRole) throw await AuthContextErrorMap[ctxType].FORBIDDEN();
+			if (!hasRole) throw forbidden();
 		}
 
 		// Check @OrgRoles() - organization member role only
-		const requiredOrgRoles = this.reflector.getAllAndOverride<string[]>(
-			"ORG_ROLES",
-			[context.getHandler(), context.getClass()],
+		const requiredOrgRoles = getAllAndOverride<string[]>(
+			ORG_ROLES_KEY,
+			targets,
 		);
 
 		if (requiredOrgRoles && requiredOrgRoles.length > 0) {
@@ -203,19 +169,16 @@ export class AuthGuard implements CanActivate {
 				headers,
 				requiredOrgRoles,
 			);
-			if (!hasOrgRole) throw await AuthContextErrorMap[ctxType].FORBIDDEN();
+			if (!hasOrgRole) throw forbidden();
 		}
 
 		// Check @UserHasPermission() - permission-based access control
-		const permissionCheck = this.reflector.getAllAndOverride<
-			| {
-					userId?: string;
-					role?: string;
-					permission?: Record<string, string[]>;
-					permissions?: Record<string, string[]>;
-			  }
-			| undefined
-		>("USER_HAS_PERMISSION", [context.getHandler(), context.getClass()]);
+		const permissionCheck = getAllAndOverride<{
+			userId?: string;
+			role?: string;
+			permission?: Record<string, string[]>;
+			permissions?: Record<string, string[]>;
+		}>(USER_HAS_PERMISSION_KEY, targets);
 
 		if (permissionCheck) {
 			const hasPermission = await this.checkUserPermission(
@@ -223,16 +186,13 @@ export class AuthGuard implements CanActivate {
 				headers,
 				permissionCheck,
 			);
-			if (!hasPermission) throw await AuthContextErrorMap[ctxType].FORBIDDEN();
+			if (!hasPermission) throw forbidden();
 		}
 
 		// Check @MemberHasPermission() - organization member permission-based access control
-		const memberPermissionCheck = this.reflector.getAllAndOverride<
-			| {
-					permissions: Record<string, string[]>;
-			  }
-			| undefined
-		>("MEMBER_HAS_PERMISSION", [context.getHandler(), context.getClass()]);
+		const memberPermissionCheck = getAllAndOverride<{
+			permissions: Record<string, string[]>;
+		}>(MEMBER_HAS_PERMISSION_KEY, targets);
 
 		if (memberPermissionCheck) {
 			const hasMemberPermission = await this.checkMemberPermission(
@@ -240,8 +200,7 @@ export class AuthGuard implements CanActivate {
 				headers,
 				memberPermissionCheck,
 			);
-			if (!hasMemberPermission)
-				throw await AuthContextErrorMap[ctxType].FORBIDDEN();
+			if (!hasMemberPermission) throw forbidden();
 		}
 
 		return true;
@@ -282,7 +241,7 @@ export class AuthGuard implements CanActivate {
 	): Promise<string | undefined> {
 		// Better Auth organization plugin exposes getActiveMemberRole or getActiveMember API
 		// biome-ignore lint/suspicious/noExplicitAny: Better Auth API types vary by plugin configuration
-		const authApi = this.options.auth.api as any;
+		const authApi = this.authService.api as any;
 
 		// Try getActiveMemberRole first (most direct for our use case)
 		if (typeof authApi.getActiveMemberRole === "function") {
@@ -364,7 +323,7 @@ export class AuthGuard implements CanActivate {
 	): Promise<boolean> {
 		try {
 			// biome-ignore lint/suspicious/noExplicitAny: Better Auth API types vary by plugin configuration
-			const authApi = this.options.auth.api as any;
+			const authApi = this.authService.api as any;
 
 			// Check if userHasPermission API is available
 			if (typeof authApi.userHasPermission !== "function") {
@@ -447,7 +406,7 @@ export class AuthGuard implements CanActivate {
 
 		try {
 			// biome-ignore lint/suspicious/noExplicitAny: Better Auth API types vary by plugin configuration
-			const authApi = this.options.auth.api as any;
+			const authApi = this.authService.api as any;
 
 			// Check if hasPermission API is available (organization plugin)
 			if (typeof authApi.hasPermission !== "function") {

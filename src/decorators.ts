@@ -1,10 +1,11 @@
+import { createParamDecorator } from "@kenzuya/honest";
+import type { createAuthMiddleware } from "better-auth/api";
 import {
+	type ClassOrMethodDecorator,
 	SetMetadata,
 	applyDecorators,
-	createParamDecorator,
-} from "@nestjs/common";
-import type { CustomDecorator, ExecutionContext } from "@nestjs/common";
-import type { createAuthMiddleware } from "better-auth/api";
+	registerHookProvider,
+} from "./metadata.ts";
 import {
 	AFTER_DATABASE_HOOK_KEY,
 	AFTER_HOOK_KEY,
@@ -12,30 +13,37 @@ import {
 	BEFORE_HOOK_KEY,
 	DATABASE_HOOK_KEY,
 	HOOK_KEY,
+	MEMBER_HAS_PERMISSION_KEY,
+	OPTIONAL_KEY,
+	ORG_ROLES_KEY,
+	PUBLIC_KEY,
+	REQUIRE_ACTIVE_ORG_KEY,
+	ROLES_KEY,
+	SESSION_CONTEXT_KEY,
+	USER_HAS_PERMISSION_KEY,
 } from "./symbols.ts";
-import { getRequestFromContext } from "./utils.ts";
 
 /**
  * Allows unauthenticated (anonymous) access to a route or controller.
- * When applied, the AuthGuard will not perform authentication checks.
+ * When applied, the AuthGuard still resolves the session but never rejects the request.
  */
-export const AllowAnonymous = (): CustomDecorator<string> =>
-	SetMetadata("PUBLIC", true);
+export const AllowAnonymous = (): ClassOrMethodDecorator =>
+	SetMetadata(PUBLIC_KEY, true);
 
 /**
  * Marks a route or controller as having optional authentication.
  * When applied, the AuthGuard allows the request to proceed
  * even if no session is present.
  */
-export const OptionalAuth = (): CustomDecorator<string> =>
-	SetMetadata("OPTIONAL", true);
+export const OptionalAuth = (): ClassOrMethodDecorator =>
+	SetMetadata(OPTIONAL_KEY, true);
 
 /**
  * Requires an authenticated session with an active organization selected.
  * Does not check for any specific organization role.
  */
-export const RequireActiveOrg = (): CustomDecorator<string> =>
-	SetMetadata("REQUIRE_ACTIVE_ORG", true);
+export const RequireActiveOrg = (): ClassOrMethodDecorator =>
+	SetMetadata(REQUIRE_ACTIVE_ORG_KEY, true);
 
 /**
  * Specifies the user-level roles required to access a route or controller.
@@ -50,8 +58,8 @@ export const RequireActiveOrg = (): CustomDecorator<string> =>
  * @Roles(['admin'])  // Only users with user.role = 'admin' can access
  * ```
  */
-export const Roles = (roles: string[]): CustomDecorator =>
-	SetMetadata("ROLES", roles);
+export const Roles = (roles: string[]): ClassOrMethodDecorator =>
+	SetMetadata(ROLES_KEY, roles);
 
 /**
  * Specifies the organization-level roles required to access a route or controller.
@@ -66,8 +74,8 @@ export const Roles = (roles: string[]): CustomDecorator =>
  * @OrgRoles(['owner', 'admin'])  // Only org owners/admins can access
  * ```
  */
-export const OrgRoles = (roles: string[]): CustomDecorator =>
-	applyDecorators(RequireActiveOrg(), SetMetadata("ORG_ROLES", roles));
+export const OrgRoles = (roles: string[]): ClassOrMethodDecorator =>
+	applyDecorators(RequireActiveOrg(), SetMetadata(ORG_ROLES_KEY, roles));
 
 /**
  * Type for permission checks - maps resource names to arrays of actions
@@ -112,13 +120,13 @@ export interface UserHasPermissionOptions {
  */
 export const UserHasPermission = (
 	options: UserHasPermissionOptions,
-): CustomDecorator => {
+): ClassOrMethodDecorator => {
 	if (!options.permission && !options.permissions) {
 		throw new Error(
 			"UserHasPermission: Either 'permission' or 'permissions' must be provided",
 		);
 	}
-	return SetMetadata("USER_HAS_PERMISSION", options);
+	return SetMetadata(USER_HAS_PERMISSION_KEY, options);
 };
 
 /**
@@ -147,11 +155,11 @@ export interface MemberHasPermissionOptions {
  */
 export const MemberHasPermission = (
 	options: MemberHasPermissionOptions,
-): CustomDecorator => {
+): ClassOrMethodDecorator => {
 	if (!options.permissions) {
 		throw new Error("MemberHasPermission: 'permissions' must be provided");
 	}
-	return SetMetadata("MEMBER_HAS_PERMISSION", options);
+	return SetMetadata(MEMBER_HAS_PERMISSION_KEY, options);
 };
 
 /**
@@ -165,16 +173,13 @@ export const Public = AllowAnonymous;
 export const Optional = OptionalAuth;
 
 /**
- * Parameter decorator that extracts the user session from the request.
- * Provides easy access to the authenticated user's session data in controller methods.
- * Works with both HTTP and GraphQL execution contexts.
+ * Parameter decorator that extracts the user session resolved by the AuthGuard.
+ * Resolves to `null` when the request has no session (for example on `@OptionalAuth()` routes)
+ * and to `undefined` when the AuthGuard did not run for the route.
  */
 export const Session: ReturnType<typeof createParamDecorator> =
-	createParamDecorator(
-		async (_data: unknown, context: ExecutionContext): Promise<unknown> => {
-			const request = await getRequestFromContext(context);
-			return request.session;
-		},
+	createParamDecorator(SESSION_CONTEXT_KEY, (_data, c) =>
+		c.get(SESSION_CONTEXT_KEY),
 	);
 /**
  * Represents the context object passed to hooks.
@@ -188,21 +193,25 @@ export type AuthHookContext = Parameters<
  * Registers a method to be executed before a specific auth route is processed.
  * @param path - The auth route path that triggers this hook (must start with '/')
  */
-export const BeforeHook = (path?: `/${string}`): CustomDecorator<symbol> =>
+export const BeforeHook = (path?: `/${string}`): MethodDecorator =>
 	SetMetadata(BEFORE_HOOK_KEY, path);
 
 /**
  * Registers a method to be executed after a specific auth route is processed.
  * @param path - The auth route path that triggers this hook (must start with '/')
  */
-export const AfterHook = (path?: `/${string}`): CustomDecorator<symbol> =>
+export const AfterHook = (path?: `/${string}`): MethodDecorator =>
 	SetMetadata(AFTER_HOOK_KEY, path);
 
 /**
- * Class decorator that marks a provider as containing hook methods.
+ * Class decorator that marks a service as containing hook methods.
  * Must be applied to classes that use BeforeHook or AfterHook decorators.
+ * The class must also be a `@Service()` listed in a module's `services`.
  */
-export const Hook = (): ClassDecorator => SetMetadata(HOOK_KEY, true);
+export const Hook = (): ClassDecorator => (target) => {
+	Reflect.defineMetadata(HOOK_KEY, true, target);
+	registerHookProvider(target as never);
+};
 
 /**
  * The models that support database hooks in Better Auth.
@@ -215,62 +224,53 @@ export type DatabaseHookModel = "user" | "session" | "account" | "verification";
 export type DatabaseHookOperation = "create" | "update" | "delete";
 
 /**
- * Class decorator that marks a provider as containing database hook methods.
+ * Class decorator that marks a service as containing database hook methods.
  * Must be applied to classes that use database hook method decorators.
+ * The class must also be a `@Service()` listed in a module's `services`.
  */
-export const DatabaseHook = (): ClassDecorator =>
-	SetMetadata(DATABASE_HOOK_KEY, true);
+export const DatabaseHook = (): ClassDecorator => (target) => {
+	Reflect.defineMetadata(DATABASE_HOOK_KEY, true, target);
+	registerHookProvider(target as never);
+};
 
 /**
  * Registers a method to be executed before a record is created.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const BeforeCreate = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const BeforeCreate = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(BEFORE_DATABASE_HOOK_KEY, { model, operation: "create" });
 
 /**
  * Registers a method to be executed after a record is created.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const AfterCreate = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const AfterCreate = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(AFTER_DATABASE_HOOK_KEY, { model, operation: "create" });
 
 /**
  * Registers a method to be executed before a record is updated.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const BeforeUpdate = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const BeforeUpdate = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(BEFORE_DATABASE_HOOK_KEY, { model, operation: "update" });
 
 /**
  * Registers a method to be executed after a record is updated.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const AfterUpdate = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const AfterUpdate = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(AFTER_DATABASE_HOOK_KEY, { model, operation: "update" });
 
 /**
  * Registers a method to be executed before a record is deleted.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const BeforeDelete = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const BeforeDelete = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(BEFORE_DATABASE_HOOK_KEY, { model, operation: "delete" });
 
 /**
  * Registers a method to be executed after a record is deleted.
  * @param model - The model to hook into (user, session, account, verification)
  */
-export const AfterDelete = (
-	model: DatabaseHookModel,
-): CustomDecorator<symbol> =>
+export const AfterDelete = (model: DatabaseHookModel): MethodDecorator =>
 	SetMetadata(AFTER_DATABASE_HOOK_KEY, { model, operation: "delete" });

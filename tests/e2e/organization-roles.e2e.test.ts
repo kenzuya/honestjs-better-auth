@@ -1,17 +1,15 @@
-import request from "supertest";
+import { beforeAll, describe, expect, it } from "bun:test";
+import request from "../shared/request.ts";
 import { faker } from "@faker-js/faker";
-import { Test } from "@nestjs/testing";
-import { Module, type INestApplication } from "@nestjs/common";
 import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins/bearer";
 import { organization } from "better-auth/plugins/organization";
 import { admin } from "better-auth/plugins/admin";
-import { AuthModule } from "../../src/index.ts";
 import {
 	ActiveOrgController,
 	TestController,
 } from "../shared/test-controller.ts";
-import { createTestNestApplication } from "../shared/test-utils.ts";
+import { createAuthTestApp } from "../shared/test-utils.ts";
 
 /**
  * Creates a Better Auth instance with organization plugin enabled
@@ -38,35 +36,20 @@ function createTestAuthWithOrganization() {
 async function createTestAppWithOrganization() {
 	const auth = createTestAuthWithOrganization();
 
-	@Module({
-		imports: [AuthModule.forRoot({ auth })],
+	const testApp = await createAuthTestApp(auth, {
 		controllers: [TestController, ActiveOrgController],
-	})
-	class AppModule {}
+	});
 
-	const moduleRef = await Test.createTestingModule({
-		imports: [AppModule],
-	}).compile();
-
-	const app = await createTestNestApplication(moduleRef);
-
-	return { app, auth };
+	return { ...testApp, auth };
 }
 
-interface TestAppSetup {
-	app: INestApplication;
-	auth: ReturnType<typeof createTestAuthWithOrganization>;
-}
+type TestAppSetup = Awaited<ReturnType<typeof createTestAppWithOrganization>>;
 
 describe("organization roles e2e", () => {
 	let testSetup: TestAppSetup;
 
 	beforeAll(async () => {
 		testSetup = await createTestAppWithOrganization();
-	});
-
-	afterAll(async () => {
-		await testSetup.app.close();
 	});
 
 	describe("@Roles() - user.role only (admin plugin)", () => {
@@ -88,7 +71,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/admin-protected")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(200);
@@ -136,7 +119,7 @@ describe("organization roles e2e", () => {
 
 			// Even though user is org owner, @Roles(['admin']) should NOT grant access
 			// because @Roles only checks user.role, not org member role
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/admin-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -151,7 +134,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/admin-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403)
@@ -194,7 +177,7 @@ describe("organization roles e2e", () => {
 			});
 
 			// User is org owner, @OrgRoles(['owner']) should grant access
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/org-owner-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(200);
@@ -238,7 +221,7 @@ describe("organization roles e2e", () => {
 			});
 
 			// Owner should have access to @OrgRoles(['owner', 'admin'])
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/org-owner-admin-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(200);
@@ -271,7 +254,7 @@ describe("organization roles e2e", () => {
 
 			// @OrgRoles only checks org member role, not user.role
 			// So even system admin should be denied without active org
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/org-owner-protected")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(403);
@@ -287,7 +270,7 @@ describe("organization roles e2e", () => {
 			});
 
 			// No active org set - should be denied
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/org-owner-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -347,7 +330,7 @@ describe("organization roles e2e", () => {
 			});
 
 			// Admin should be able to access @OrgRoles(['admin']) route
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/org-admin-protected")
 				.set("Authorization", `Bearer ${adminSignUp.token}`)
 				.expect(200);
@@ -413,13 +396,13 @@ describe("organization roles e2e", () => {
 			});
 
 			// Member should be denied from @OrgRoles(['owner']) route
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/org-owner-protected")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(403);
 
 			// But member should be able to access @OrgRoles(['member']) route
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/org-member-protected")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -442,7 +425,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/test/active-org-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403)
@@ -484,7 +467,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/active-org-protected")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(200);
@@ -548,7 +531,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/test/active-org-protected")
 				.set("Authorization", `Bearer ${memberSignUp.token}`)
 				.expect(200);
@@ -577,7 +560,7 @@ describe("organization roles e2e", () => {
 			// biome-ignore lint/suspicious/noExplicitAny: API types vary by plugin
 			const authApi = testSetup.auth.api as any;
 
-			await request(testSetup.app.getHttpServer())
+			await request(testSetup.hono)
 				.get("/active-org-controller/projects")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(403);
@@ -601,7 +584,7 @@ describe("organization roles e2e", () => {
 				},
 			});
 
-			const response = await request(testSetup.app.getHttpServer())
+			const response = await request(testSetup.hono)
 				.get("/active-org-controller/projects")
 				.set("Authorization", `Bearer ${signUp.token}`)
 				.expect(200);

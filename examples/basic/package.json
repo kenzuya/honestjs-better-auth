@@ -1,0 +1,20 @@
+{
+	"name": "honest-better-auth-example",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "bun --watch src/main.ts",
+		"start": "bun src/main.ts"
+	},
+	"dependencies": {
+		"@kenzuya/honest": "^0.1.23",
+		"@kenzuya/honest-better-auth": "^1.0.0",
+		"better-auth": "^1.7.7",
+		"hono": "^4.12.8",
+		"reflect-metadata": "^0.2.2"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5.9.3"
+	}
+}

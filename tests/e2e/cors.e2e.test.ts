@@ -1,34 +1,19 @@
-import cors from "@fastify/cors";
-import request from "supertest";
-import { vi } from "vitest";
-import { createTestApp, type TestAppSetup } from "../shared/test-utils.ts";
+import { describe, expect, it } from "bun:test";
+import request from "../shared/request.ts";
+import { createTestApp } from "../shared/test-utils.ts";
 
 const TRUSTED_ORIGIN = "http://localhost:3000";
-const isFastify = process.env.TEST_HTTP_ADAPTER === "fastify";
-const fastifyOnly = isFastify ? it : it.skip;
+const UNTRUSTED_ORIGIN = "http://evil.example.com";
 
 describe("cors e2e", () => {
-	let testSetup: TestAppSetup | undefined;
-
-	afterEach(async () => {
-		vi.restoreAllMocks();
-
-		if (!testSetup) return;
-
-		await testSetup.app.close();
-		testSetup = undefined;
-	});
-
 	it("should apply trustedOrigins CORS headers on Better Auth routes", async () => {
-		testSetup = await createTestApp(undefined, false, {
+		const testSetup = await createTestApp(undefined, {
 			authOptions: {
 				trustedOrigins: [TRUSTED_ORIGIN],
 			},
 		});
 
-		const httpServer = testSetup.app.getHttpServer();
-
-		const optionsResponse = await request(httpServer)
+		const optionsResponse = await request(testSetup.hono)
 			.options("/api/auth/sign-in/email")
 			.set("Origin", TRUSTED_ORIGIN)
 			.set("Access-Control-Request-Method", "POST")
@@ -41,14 +26,13 @@ describe("cors e2e", () => {
 		expect(optionsResponse.headers["access-control-allow-credentials"]).toBe(
 			"true",
 		);
+		expect(
+			optionsResponse.headers["access-control-allow-headers"]
+				?.split(",")
+				.map((header) => header.trim()),
+		).toEqual(["content-type", "stripe-signature"]);
 
-		if (isFastify) {
-			expect(optionsResponse.headers["access-control-allow-headers"]).toBe(
-				"content-type, stripe-signature",
-			);
-		}
-
-		const okResponse = await request(httpServer)
+		const okResponse = await request(testSetup.hono)
 			.get("/api/auth/ok")
 			.set("Origin", TRUSTED_ORIGIN);
 
@@ -59,89 +43,142 @@ describe("cors e2e", () => {
 		expect(okResponse.headers["access-control-allow-credentials"]).toBe("true");
 	});
 
-	fastifyOnly(
-		"should coexist with app-level Fastify CORS when @fastify/cors is already registered",
-		async () => {
-			testSetup = await createTestApp(undefined, false, {
+	it("should not allow origins outside trustedOrigins", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: [TRUSTED_ORIGIN],
+			},
+		});
+
+		const okResponse = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", UNTRUSTED_ORIGIN);
+
+		expect(okResponse.status).toBe(200);
+		expect(okResponse.headers["access-control-allow-origin"]).toBeUndefined();
+	});
+
+	it("should evaluate function-based trustedOrigins with the request", async () => {
+		const requests: Request[] = [];
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: async (req) => {
+					if (req) requests.push(req);
+					return [TRUSTED_ORIGIN];
+				},
+			},
+		});
+
+		const okResponse = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", TRUSTED_ORIGIN);
+
+		expect(okResponse.status).toBe(200);
+		expect(okResponse.headers["access-control-allow-origin"]).toBe(
+			TRUSTED_ORIGIN,
+		);
+		expect(requests.length).toBeGreaterThan(0);
+		expect(new URL(requests[0]?.url ?? "").pathname).toBe("/api/auth/ok");
+	});
+
+	it("should not apply CORS to the application's own routes", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: [TRUSTED_ORIGIN],
+			},
+		});
+
+		const response = await request(testSetup.hono)
+			.get("/test/public")
+			.set("Origin", TRUSTED_ORIGIN);
+
+		expect(response.status).toBe(200);
+		expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+	});
+
+	it("should not add Better Auth route CORS when disableTrustedOriginsCors is true", async () => {
+		const testSetup = await createTestApp(
+			{
+				disableTrustedOriginsCors: true,
+			},
+			{
 				authOptions: {
 					trustedOrigins: [TRUSTED_ORIGIN],
 				},
-				configureAdapter: async (adapter) => {
-					await adapter.register(cors, {
-						origin: [TRUSTED_ORIGIN],
-						credentials: true,
-					});
+			},
+		);
+
+		const okResponse = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", TRUSTED_ORIGIN);
+
+		expect(okResponse.status).toBe(200);
+		expect(okResponse.headers["access-control-allow-origin"]).toBeUndefined();
+		expect(
+			okResponse.headers["access-control-allow-credentials"],
+		).toBeUndefined();
+	});
+
+	it("should allow origins matching wildcard trustedOrigins patterns", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: ["https://*.example.com"],
+			},
+		});
+
+		const matching = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "https://app.example.com");
+		expect(matching.headers["access-control-allow-origin"]).toBe(
+			"https://app.example.com",
+		);
+
+		const other = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "https://app.example.org");
+		expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+	});
+
+	it("should allow the origin of Better Auth's baseURL", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				baseURL: "http://app.localhost:4000",
+			},
+		});
+
+		const response = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "http://app.localhost:4000");
+
+		expect(response.status).toBe(200);
+		expect(response.headers["access-control-allow-origin"]).toBe(
+			"http://app.localhost:4000",
+		);
+	});
+
+	it("should not call function-based trustedOrigins for requests without an Origin header", async () => {
+		let calls = 0;
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: async () => {
+					calls += 1;
+					return [TRUSTED_ORIGIN];
 				},
-			});
+			},
+		});
 
-			const httpServer = testSetup.app.getHttpServer();
-			const optionsResponse = await request(httpServer)
-				.options("/api/auth/sign-in/email")
-				.set("Origin", TRUSTED_ORIGIN)
-				.set("Access-Control-Request-Method", "POST")
-				.set("Access-Control-Request-Headers", "content-type");
+		const beforeWithoutOrigin = calls;
+		await request(testSetup.hono).get("/api/auth/ok").expect(200);
+		const withoutOrigin = calls - beforeWithoutOrigin;
 
-			expect(optionsResponse.status).toBe(204);
-			expect(optionsResponse.headers["access-control-allow-origin"]).toBe(
-				TRUSTED_ORIGIN,
-			);
+		const beforeWithOrigin = calls;
+		await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", TRUSTED_ORIGIN)
+			.expect(200);
+		const withOrigin = calls - beforeWithOrigin;
 
-			const okResponse = await request(httpServer)
-				.get("/api/auth/ok")
-				.set("Origin", TRUSTED_ORIGIN);
-
-			expect(okResponse.status).toBe(200);
-			expect(okResponse.headers["access-control-allow-origin"]).toBe(
-				TRUSTED_ORIGIN,
-			);
-			expect(okResponse.headers["access-control-allow-credentials"]).toBe(
-				"true",
-			);
-		},
-	);
-
-	fastifyOnly(
-		"should not add Better Auth route CORS on Fastify when disableTrustedOriginsCors is true",
-		async () => {
-			testSetup = await createTestApp(
-				{
-					disableTrustedOriginsCors: true,
-				},
-				false,
-				{
-					authOptions: {
-						trustedOrigins: [TRUSTED_ORIGIN],
-					},
-					configureAdapter: async (adapter) => {
-						await adapter.register(cors, {
-							origin: [TRUSTED_ORIGIN],
-							credentials: true,
-						});
-					},
-				},
-			);
-
-			const httpServer = testSetup.app.getHttpServer();
-			const optionsResponse = await request(httpServer)
-				.options("/api/auth/sign-in/email")
-				.set("Origin", TRUSTED_ORIGIN)
-				.set("Access-Control-Request-Method", "POST")
-				.set("Access-Control-Request-Headers", "content-type");
-
-			expect(optionsResponse.status).toBe(204);
-			expect(optionsResponse.headers["access-control-allow-origin"]).toBe(
-				TRUSTED_ORIGIN,
-			);
-
-			const okResponse = await request(httpServer)
-				.get("/api/auth/ok")
-				.set("Origin", TRUSTED_ORIGIN);
-
-			expect(okResponse.status).toBe(200);
-			expect(okResponse.headers["access-control-allow-origin"]).toBeUndefined();
-			expect(
-				okResponse.headers["access-control-allow-credentials"],
-			).toBeUndefined();
-		},
-	);
+		// Better Auth calls it once per request itself; the CORS check adds one call only when there is an Origin
+		expect(withOrigin - withoutOrigin).toBe(1);
+	});
 });

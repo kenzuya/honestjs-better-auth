@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to `@thallesp/nestjs-better-auth`! This
+Thanks for your interest in contributing to `@kenzuya/honest-better-auth`! This
 guide covers how to set up the project, the commands you'll use, and what we
 expect from a pull request.
 
@@ -25,14 +25,15 @@ Prerequisites:
 
 ```bash
 # 1. Fork and clone your fork
-git clone https://github.com/<your-username>/nestjs-better-auth.git
-cd nestjs-better-auth
+git clone https://github.com/<your-username>/honestjs-better-auth.git
+cd honestjs-better-auth
 
 # 2. Install dependencies (uses bun.lock)
 bun install
 
 # 3. Make sure the baseline is green before changing anything
 bun run check
+bun run typecheck
 bun run build
 bun run test
 ```
@@ -45,13 +46,12 @@ bun run test
 | `bun run check`         | Lint **and** format check (Biome) — run before a PR   |
 | `bun run lint`          | Lint only                                             |
 | `bun run format`        | Format only                                           |
-| `bun run test`          | Run the full suite on both adapters (Express + Fastify) |
-| `bun run test:express`  | Run the suite on the Express adapter                  |
-| `bun run test:fastify`  | Run the suite on the Fastify adapter                  |
+| `bun run typecheck`     | Type-check the sources and tests with `tsc`           |
+| `bun run test`          | Run the test suite with `bun test`                    |
 | `bun run test:watch`    | Run tests in watch mode                               |
 
-This library is HTTP-adapter agnostic and supports both **Express** and
-**Fastify**, so please make sure your change passes on both adapters.
+The tests run Honest applications in-process through `hono.request()`, so no
+server or database is needed.
 
 ## Opening a pull request
 
@@ -59,7 +59,8 @@ This library is HTTP-adapter agnostic and supports both **Express** and
    non-trivial work, so we can agree on the approach and avoid wasted effort.
 2. Create a branch from `master` with a descriptive name.
 3. Make your change, with tests when it affects behavior.
-4. Run `bun run check` and `bun run test` locally — both must pass.
+4. Run `bun run check`, `bun run typecheck` and `bun run test` locally — all
+   must pass.
 5. Open the PR against `master`, fill in the template, and link the issue
    (`Closes #123`).
 

@@ -87,6 +87,16 @@ function getMetadataTargets(c: Context): (object | undefined)[] {
 	return [handler as object | undefined, controllerClass];
 }
 
+const guardServices = new WeakMap<AuthGuard, AuthService<Auth>>();
+
+/**
+ * Returns the AuthService a guard uses, so the plugin can bind the auth instance to a guard the DI
+ * container created before the plugin ran. Not exported from the package.
+ */
+export function getAuthGuardService(guard: AuthGuard): AuthService<Auth> {
+	return guardServices.get(guard) as AuthService<Auth>;
+}
+
 /**
  * Honest guard that handles authentication for protected routes.
  * Register it globally with `components: { guards: [AuthGuard] }` or per controller/route with
@@ -95,9 +105,13 @@ function getMetadataTargets(c: Context): (object | undefined)[] {
  */
 export class AuthGuard implements IGuard {
 	// The default keeps the constructor arity at 0; the BetterAuthPlugin registers a configured instance.
-	constructor(
-		private readonly authService: AuthService<Auth> = new AuthService<Auth>(),
-	) {}
+	constructor(authService: AuthService<Auth> = new AuthService<Auth>()) {
+		guardServices.set(this, authService);
+	}
+
+	private get authService(): AuthService<Auth> {
+		return getAuthGuardService(this);
+	}
 
 	/**
 	 * Validates if the current request is authenticated

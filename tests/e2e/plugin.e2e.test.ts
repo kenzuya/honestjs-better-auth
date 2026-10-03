@@ -4,11 +4,14 @@ import { faker } from "@faker-js/faker";
 import {
 	Controller,
 	Get,
+	type IMiddleware,
+	type IPlugin,
 	NoopLogger,
 	Service,
 	UseGuards,
 	createTestApplication,
 } from "@kenzuya/honest";
+import type { Context, Next } from "hono";
 import {
 	AllowAnonymous,
 	AuthGuard,
@@ -62,6 +65,29 @@ class UnguardedController {
 	unguarded(@Session() session: UserSession | undefined) {
 		return { hasSession: session !== undefined };
 	}
+}
+
+// Global middleware is resolved when the application is constructed, before plugins run
+@Service()
+class SessionHeaderMiddleware implements IMiddleware {
+	constructor(private readonly authService: AuthService<TestAuth>) {}
+
+	async use(c: Context, next: Next) {
+		const session = await this.authService.api.getSession({
+			headers: c.req.raw.headers,
+		});
+		await next();
+		c.res.headers.set("x-has-session", String(Boolean(session)));
+	}
+}
+
+// Resolves AuthGuard from the container before the BetterAuthPlugin runs and keeps it
+class EarlyGuardPlugin implements IPlugin {
+	guard?: AuthGuard;
+
+	beforeModulesRegistered: IPlugin["beforeModulesRegistered"] = (app) => {
+		this.guard = app.getContainer().resolve(AuthGuard);
+	};
 }
 
 describe("plugin e2e", () => {
@@ -162,5 +188,61 @@ describe("plugin e2e", () => {
 
 		const response = await request(hono).get("/guarded").expect(500);
 		expect(response.body.message).toMatch(/BetterAuthPlugin/);
+	});
+
+	it("should bind the auth instance to an AuthService resolved before the plugin ran", async () => {
+		const auth = createTestAuth();
+		const { hono } = await createAuthTestApp(auth, {
+			controllers: [ProfileController],
+			services: [ProfileService],
+			appOptions: { components: { middleware: [SessionHeaderMiddleware] } },
+		});
+		const signUp = await auth.api.signUpEmail({
+			body: {
+				name: faker.person.fullName(),
+				email: faker.internet.email(),
+				password: faker.internet.password({ length: 10 }),
+			},
+		});
+
+		const anonymous = await request(hono).get("/profile/has-auth").expect(200);
+		expect(anonymous.headers["x-has-session"]).toBe("false");
+
+		const signedIn = await request(hono)
+			.get("/profile/me")
+			.set("Authorization", `Bearer ${signUp.token}`)
+			.expect(200);
+		expect(signedIn.headers["x-has-session"]).toBe("true");
+	});
+
+	it("should bind the auth instance to an AuthGuard resolved before the plugin ran", async () => {
+		const auth = createTestAuth();
+		const earlyGuardPlugin = new EarlyGuardPlugin();
+		const { app, hono } = await createTestApplication({
+			controllers: [GuardedController],
+			appOptions: {
+				logger: new NoopLogger(),
+				plugins: [earlyGuardPlugin, new BetterAuthPlugin({ auth })],
+			},
+		});
+
+		// The guard created early is the one requests use, so whatever holds it keeps working
+		expect(earlyGuardPlugin.guard).toBeInstanceOf(AuthGuard);
+		expect(app.getContainer().resolve(AuthGuard)).toBe(
+			earlyGuardPlugin.guard as AuthGuard,
+		);
+		const signUp = await auth.api.signUpEmail({
+			body: {
+				name: faker.person.fullName(),
+				email: faker.internet.email(),
+				password: faker.internet.password({ length: 10 }),
+			},
+		});
+
+		const response = await request(hono)
+			.get("/guarded")
+			.set("Authorization", `Bearer ${signUp.token}`)
+			.expect(200);
+		expect(response.body).toEqual({ userId: signUp.user.id });
 	});
 });

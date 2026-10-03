@@ -1,5 +1,16 @@
 import type { Auth } from "better-auth";
 
+// The auth instance lives outside the service so the plugin can bind it to a service that the DI
+// container created before the plugin ran (for example for a global middleware).
+const authInstances = new WeakMap<object, unknown>();
+
+/**
+ * Binds a Better Auth instance to a service. Used by the plugin; not exported from the package.
+ */
+export function bindAuthInstance(service: object, auth: unknown): void {
+	authInstances.set(service, auth);
+}
+
 /**
  * Service that provides access to the Better Auth instance.
  * The BetterAuthPlugin registers it in the application's DI container, so it can be injected
@@ -7,12 +18,10 @@ import type { Auth } from "better-auth";
  * Use generics to support auth instances extended by plugins.
  */
 export class AuthService<T extends { api: T["api"] } = Auth> {
-	readonly #auth: T | undefined;
-
-	// The default keeps the constructor arity at 0, so a container without the plugin can still
-	// create the service and the getters below report the missing plugin.
+	// The default keeps the constructor arity at 0, so a container can create the service before the
+	// plugin binds an instance to it, and the getters below report a missing plugin.
 	constructor(auth: T | undefined = undefined) {
-		this.#auth = auth;
+		if (auth) bindAuthInstance(this, auth);
 	}
 
 	/**
@@ -27,11 +36,12 @@ export class AuthService<T extends { api: T["api"] } = Auth> {
 	 * Access this for plugin-specific functionality
 	 */
 	get instance(): T {
-		if (!this.#auth) {
+		const auth = authInstances.get(this) as T | undefined;
+		if (!auth) {
 			throw new Error(
 				"AuthService has no Better Auth instance. Register the plugin: Application.create(AppModule, { plugins: [new BetterAuthPlugin({ auth })] }).",
 			);
 		}
-		return this.#auth;
+		return auth;
 	}
 }

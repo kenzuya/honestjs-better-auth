@@ -118,4 +118,67 @@ describe("cors e2e", () => {
 			okResponse.headers["access-control-allow-credentials"],
 		).toBeUndefined();
 	});
+
+	it("should allow origins matching wildcard trustedOrigins patterns", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: ["https://*.example.com"],
+			},
+		});
+
+		const matching = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "https://app.example.com");
+		expect(matching.headers["access-control-allow-origin"]).toBe(
+			"https://app.example.com",
+		);
+
+		const other = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "https://app.example.org");
+		expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+	});
+
+	it("should allow the origin of Better Auth's baseURL", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				baseURL: "http://app.localhost:4000",
+			},
+		});
+
+		const response = await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", "http://app.localhost:4000");
+
+		expect(response.status).toBe(200);
+		expect(response.headers["access-control-allow-origin"]).toBe(
+			"http://app.localhost:4000",
+		);
+	});
+
+	it("should not call function-based trustedOrigins for requests without an Origin header", async () => {
+		let calls = 0;
+		const testSetup = await createTestApp(undefined, {
+			authOptions: {
+				trustedOrigins: async () => {
+					calls += 1;
+					return [TRUSTED_ORIGIN];
+				},
+			},
+		});
+
+		const beforeWithoutOrigin = calls;
+		await request(testSetup.hono).get("/api/auth/ok").expect(200);
+		const withoutOrigin = calls - beforeWithoutOrigin;
+
+		const beforeWithOrigin = calls;
+		await request(testSetup.hono)
+			.get("/api/auth/ok")
+			.set("Origin", TRUSTED_ORIGIN)
+			.expect(200);
+		const withOrigin = calls - beforeWithOrigin;
+
+		// Better Auth calls it once per request itself; the CORS check adds one call only when there is an Origin
+		expect(withOrigin - withoutOrigin).toBe(1);
+	});
 });

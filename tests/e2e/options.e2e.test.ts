@@ -113,4 +113,77 @@ describe("options e2e", () => {
 		await request(testSetup.hono).get("/auth/ok").expect(200);
 		await request(testSetup.hono).get("/api/auth/ok").expect(404);
 	});
+
+	it("should mount Better Auth on the path of its baseURL", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: { baseURL: "http://localhost/auth" },
+		});
+
+		await request(testSetup.hono).get("/auth/ok").expect(200);
+		await request(testSetup.hono).get("/api/auth/ok").expect(404);
+	});
+
+	it("should keep controller routes reachable when basePath is '/'", async () => {
+		const testSetup = await createTestApp(undefined, {
+			authOptions: { basePath: "/" },
+		});
+
+		const publicResponse = await request(testSetup.hono)
+			.get("/test/public")
+			.expect(200);
+		expect(publicResponse.body).toEqual({ ok: true });
+		await request(testSetup.hono).get("/test/protected").expect(401);
+
+		const ok = await request(testSetup.hono).get("/ok").expect(200);
+		expect(ok.body).toEqual({ ok: true });
+	});
+
+	it("should let the middleware read the request body", async () => {
+		const bodies: unknown[] = [];
+		const testSetup = await createTestApp({
+			middleware: async (c, next) => {
+				if (c.req.method === "POST") bodies.push(await c.req.json());
+				await next();
+			},
+		});
+		const body = {
+			name: faker.person.fullName(),
+			email: faker.internet.email(),
+			password: faker.internet.password({ length: 10 }),
+		};
+
+		const response = await request(testSetup.hono)
+			.post("/api/auth/sign-up/email")
+			.send(body)
+			.expect(200);
+
+		expect(bodies).toEqual([body]);
+		expect(response.body.user.email).toBe(body.email.toLowerCase());
+	});
+
+	it("should let global Honest middleware read the request body", async () => {
+		const testSetup = await createTestApp(undefined, {
+			appOptions: {
+				components: {
+					middleware: [
+						{
+							use: async (c, next) => {
+								if (c.req.method === "POST") await c.req.text();
+								await next();
+							},
+						},
+					],
+				},
+			},
+		});
+
+		await request(testSetup.hono)
+			.post("/api/auth/sign-up/email")
+			.send({
+				name: faker.person.fullName(),
+				email: faker.internet.email(),
+				password: faker.internet.password({ length: 10 }),
+			})
+			.expect(200);
+	});
 });

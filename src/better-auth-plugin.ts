@@ -4,31 +4,12 @@ import {
 	type IPlugin,
 	normalizePath,
 } from "@kenzuya/honest";
-import { createAuthMiddleware } from "better-auth/api";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { cors } from "hono/cors";
-import { AuthGuard } from "./auth-guard.ts";
-import { AuthService } from "./auth-service.ts";
-import type { DatabaseHookModel, DatabaseHookOperation } from "./decorators.ts";
-import { getAllMethodNames, getHookProviders } from "./metadata.ts";
-import {
-	AFTER_DATABASE_HOOK_KEY,
-	AFTER_HOOK_KEY,
-	BEFORE_DATABASE_HOOK_KEY,
-	BEFORE_HOOK_KEY,
-	DATABASE_HOOK_KEY,
-	HOOK_KEY,
-} from "./symbols.ts";
-
-const HOOKS = [
-	{ metadataKey: BEFORE_HOOK_KEY, hookType: "before" as const },
-	{ metadataKey: AFTER_HOOK_KEY, hookType: "after" as const },
-];
-
-const DATABASE_HOOKS = [
-	{ metadataKey: BEFORE_DATABASE_HOOK_KEY, hookType: "before" as const },
-	{ metadataKey: AFTER_DATABASE_HOOK_KEY, hookType: "after" as const },
-];
+import { cloneRawRequest } from "hono/request";
+import { AuthGuard, getAuthGuardService } from "./auth-guard.ts";
+import { AuthService, bindAuthInstance } from "./auth-service.ts";
+import { type BetterAuthContext, registerHooks } from "./hooks.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: i don't want to cause issues/breaking changes between different ways of setting up better-auth and even versions
 export type Auth = any;
@@ -36,7 +17,7 @@ export type Auth = any;
 export type BetterAuthPluginOptions<A = Auth> = {
 	auth: A;
 	/**
-	 * Do not add the CORS middleware that allows Better Auth's `trustedOrigins` on its routes.
+	 * Do not add the CORS middleware that allows the origins Better Auth trusts on its routes.
 	 */
 	disableTrustedOriginsCors?: boolean;
 	/**
@@ -50,15 +31,28 @@ export type BetterAuthPluginOptions<A = Auth> = {
 	middleware?: MiddlewareHandler;
 };
 
-type HookProvider = { new (...args: unknown[]): unknown };
+/**
+ * Returns the path Better Auth routes on: the path of its base URL when `baseURL` (or
+ * `BETTER_AUTH_URL`) has one, and `basePath` otherwise.
+ */
+function getBasePath(ctx: BetterAuthContext): string {
+	if (ctx.baseURL) {
+		try {
+			return normalizePath(new URL(ctx.baseURL).pathname);
+		} catch {
+			// Fall back to basePath below
+		}
+	}
+	return normalizePath(ctx.options.basePath || "/api/auth");
+}
 
 /**
  * Honest plugin that integrates Better Auth.
  *
  * - Registers `AuthService` and `AuthGuard` in the application's DI container.
- * - Mounts Better Auth's handler on its `basePath` (default `/api/auth`). The global routing
+ * - Mounts Better Auth's handler on its base path (default `/api/auth`). The global routing
  *   prefix and version do not apply to it.
- * - Allows the `trustedOrigins` from the Better Auth options through CORS on those routes.
+ * - Allows the origins Better Auth trusts through CORS on those routes.
  * - Wires `@Hook()` and `@DatabaseHook()` services into Better Auth's hooks.
  *
  * The plugin does not guard your routes by itself: add `components: { guards: [AuthGuard] }` to
@@ -67,7 +61,6 @@ type HookProvider = { new (...args: unknown[]): unknown };
 export class BetterAuthPlugin implements IPlugin {
 	readonly meta = { name: "better-auth" };
 	logger?: ILogger;
-	private readonly basePath: string;
 
 	constructor(private readonly options: BetterAuthPluginOptions) {
 		if (!options?.auth) {
@@ -75,43 +68,72 @@ export class BetterAuthPlugin implements IPlugin {
 				"BetterAuthPlugin requires a Better Auth instance: new BetterAuthPlugin({ auth }).",
 			);
 		}
-
-		// Get basePath from options or use default
-		// - Ensure basePath starts with /
-		// - Ensure basePath doesn't end with /
-		this.basePath = normalizePath(
-			options.auth.options?.basePath ?? "/api/auth",
-		);
-
-		const trustedOrigins = options.auth.options?.trustedOrigins;
-		if (
-			trustedOrigins &&
-			!Array.isArray(trustedOrigins) &&
-			typeof trustedOrigins !== "function"
-		) {
-			throw new Error(
-				"Better Auth 'trustedOrigins' must be an array of origins or a function returning one.",
-			);
-		}
 	}
 
-	beforeModulesRegistered(app: Application, hono: Hono): void {
-		const container = app.getContainer();
-		const authService = new AuthService(this.options.auth);
-		container.register(AuthService, authService);
-		container.register(AuthGuard, new AuthGuard(authService));
+	async beforeModulesRegistered(app: Application, hono: Hono): Promise<void> {
+		this.registerServices(app);
 
 		if (this.options.disableControllers) return;
 
-		// Hono's "/path/*" also matches "/path" itself
-		const route = this.basePath === "/" ? "/*" : `${this.basePath}/*`;
+		const ctx = await this.getAuthContext();
+		const basePath = getBasePath(ctx);
+		// A root base path would shadow every controller route, so it is mounted after them instead
+		if (basePath !== "/") this.mount(hono, ctx, basePath);
+	}
 
-		const corsMiddleware = this.createTrustedOriginsCors();
-		if (corsMiddleware) {
-			hono.use(route, corsMiddleware);
+	async afterModulesRegistered(app: Application, hono: Hono): Promise<void> {
+		const ctx = await this.getAuthContext();
+		registerHooks(ctx, app.getContainer());
+
+		if (!this.options.disableControllers && getBasePath(ctx) === "/") {
+			this.mount(hono, ctx, "/");
+		}
+	}
+
+	private getAuthContext(): Promise<BetterAuthContext> {
+		return this.options.auth.$context;
+	}
+
+	/**
+	 * Binds the auth instance to the container's AuthService and AuthGuard, reusing instances the
+	 * container created before the plugin ran so whatever already holds them sees the auth instance.
+	 */
+	private registerServices(app: Application): void {
+		const container = app.getContainer();
+		const { auth } = this.options;
+
+		let authService: AuthService<Auth>;
+		if (container.has(AuthService)) {
+			authService = container.resolve(AuthService);
+		} else {
+			authService = new AuthService<Auth>();
+			container.register(AuthService, authService);
+		}
+		bindAuthInstance(authService, auth);
+
+		if (container.has(AuthGuard)) {
+			bindAuthInstance(getAuthGuardService(container.resolve(AuthGuard)), auth);
+		} else {
+			container.register(AuthGuard, new AuthGuard(authService));
+		}
+	}
+
+	private mount(hono: Hono, ctx: BetterAuthContext, basePath: string): void {
+		// Hono's "/path/*" also matches "/path" itself
+		const route = basePath === "/" ? "/*" : `${basePath}/*`;
+
+		if (!this.options.disableTrustedOriginsCors) {
+			hono.use(route, this.createTrustedOriginsCors(ctx));
 		}
 
-		const handler = (c: Context) => this.options.auth.handler(c.req.raw);
+		const handler = async (c: Context) => {
+			// A middleware that read the body through Hono consumed the raw request; rebuild it from Hono's cache
+			const request = c.req.raw.bodyUsed
+				? await cloneRawRequest(c.req)
+				: c.req.raw;
+			return this.options.auth.handler(request);
+		};
+
 		if (this.options.middleware) {
 			hono.all(route, this.options.middleware, handler);
 		} else {
@@ -121,144 +143,37 @@ export class BetterAuthPlugin implements IPlugin {
 		this.logger?.emit({
 			level: "info",
 			category: "plugins",
-			message: `BetterAuthPlugin mounted Better Auth on '${this.basePath}'`,
+			message: `BetterAuthPlugin mounted Better Auth on '${basePath}'`,
 		});
 	}
 
-	afterModulesRegistered(app: Application): void {
-		const container = app.getContainer();
-		const providers = [...getHookProviders()].filter((provider) =>
-			container.has(provider),
-		);
-
-		const hookProviders = providers.filter((provider) =>
-			Reflect.getMetadata(HOOK_KEY, provider),
-		);
-
-		const hasHookProviders = hookProviders.length > 0;
-		const hooksConfigured =
-			typeof this.options.auth?.options?.hooks === "object";
-
-		if (hasHookProviders && !hooksConfigured)
-			throw new Error(
-				"Detected @Hook providers but Better Auth 'hooks' are not configured. Add 'hooks: {}' to your betterAuth(...) options.",
-			);
-
-		if (hooksConfigured) {
-			for (const provider of hookProviders) {
-				const instance = container.resolve(provider) as HookProvider;
-				const providerPrototype = Object.getPrototypeOf(instance);
-
-				for (const method of getAllMethodNames(providerPrototype)) {
-					const providerMethod = providerPrototype[method];
-					this.setupHooks(providerMethod, instance);
-				}
-			}
-		}
-
-		// Database hooks discovery
-		const databaseHookProviders = providers.filter((provider) =>
-			Reflect.getMetadata(DATABASE_HOOK_KEY, provider),
-		);
-
-		const hasDatabaseHookProviders = databaseHookProviders.length > 0;
-		const databaseHooksConfigured =
-			typeof this.options.auth?.options?.databaseHooks === "object";
-
-		if (hasDatabaseHookProviders && !databaseHooksConfigured)
-			throw new Error(
-				"Detected @DatabaseHook providers but Better Auth 'databaseHooks' is not configured. Add an empty 'databaseHooks: {}' object to your betterAuth(...) options.",
-			);
-
-		for (const provider of databaseHookProviders) {
-			const instance = container.resolve(provider) as HookProvider;
-			const providerPrototype = Object.getPrototypeOf(instance);
-
-			for (const method of getAllMethodNames(providerPrototype)) {
-				const providerMethod = providerPrototype[method];
-				this.setupDatabaseHooks(providerMethod, instance);
-			}
-		}
-	}
-
 	/**
-	 * Allows Better Auth's `trustedOrigins` on its routes. A function is called with the request.
+	 * Allows the origins Better Auth trusts, matched by Better Auth itself so wildcard and custom
+	 * scheme patterns work. Like Better Auth's own origin check, a `trustedOrigins` function is
+	 * called with the request on top of the origins resolved at startup.
 	 */
-	private createTrustedOriginsCors(): MiddlewareHandler | undefined {
-		const trustedOrigins = this.options.auth.options?.trustedOrigins;
-		if (this.options.disableTrustedOriginsCors || !trustedOrigins) {
-			return undefined;
-		}
-
+	private createTrustedOriginsCors(ctx: BetterAuthContext): MiddlewareHandler {
 		return cors({
 			origin: async (origin, c) => {
-				const origins: unknown[] =
+				if (!origin) return null;
+
+				const trustedOrigins = ctx.options.trustedOrigins;
+				const origins =
 					typeof trustedOrigins === "function"
-						? ((await trustedOrigins(c.req.raw)) ?? [])
-						: trustedOrigins;
-				return origins.includes(origin) ? origin : null;
+						? [
+								...ctx.trustedOrigins,
+								...((await trustedOrigins(c.req.raw)) ?? []).filter(
+									(value): value is string => Boolean(value),
+								),
+							]
+						: ctx.trustedOrigins;
+
+				return ctx.isTrustedOrigin.call({ trustedOrigins: origins }, origin)
+					? origin
+					: null;
 			},
 			allowMethods: ["GET", "POST", "PUT", "DELETE"],
 			credentials: true,
 		});
-	}
-
-	private setupHooks(
-		providerMethod: (...args: unknown[]) => unknown,
-		providerClass: HookProvider,
-	) {
-		if (!this.options.auth.options.hooks) return;
-
-		for (const { metadataKey, hookType } of HOOKS) {
-			const hasHook = Reflect.hasMetadata(metadataKey, providerMethod);
-			if (!hasHook) continue;
-
-			const hookPath = Reflect.getMetadata(metadataKey, providerMethod);
-
-			const originalHook = this.options.auth.options.hooks[hookType];
-			this.options.auth.options.hooks[hookType] = createAuthMiddleware(
-				async (ctx) => {
-					if (originalHook) {
-						await originalHook(ctx);
-					}
-
-					if (hookPath && hookPath !== ctx.path) return;
-
-					await providerMethod.apply(providerClass, [ctx]);
-				},
-			);
-		}
-	}
-
-	private setupDatabaseHooks(
-		providerMethod: (...args: unknown[]) => unknown,
-		providerClass: HookProvider,
-	) {
-		if (!this.options.auth.options.databaseHooks) return;
-
-		for (const { metadataKey, hookType } of DATABASE_HOOKS) {
-			if (!Reflect.hasMetadata(metadataKey, providerMethod)) continue;
-
-			const { model, operation } = Reflect.getMetadata(
-				metadataKey,
-				providerMethod,
-			) as { model: DatabaseHookModel; operation: DatabaseHookOperation };
-
-			const databaseHooks = this.options.auth.options.databaseHooks;
-
-			// Ensure the nested structure exists: databaseHooks[model][operation]
-			databaseHooks[model] ??= {};
-			databaseHooks[model][operation] ??= {};
-
-			const originalHook = databaseHooks[model][operation][hookType];
-			databaseHooks[model][operation][hookType] = async (
-				...args: unknown[]
-			) => {
-				if (originalHook) {
-					await originalHook(...args);
-				}
-				return providerMethod.apply(providerClass, args);
-			};
-		}
 	}
 }

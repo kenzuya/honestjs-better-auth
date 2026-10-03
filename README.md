@@ -58,12 +58,12 @@ export default hono;
 
 The plugin:
 
-- mounts Better Auth's handler on its `basePath` (`/api/auth/*` by default). The `routing.prefix` and `routing.version` options of your app do not apply to it; change the path through `basePath` in your Better Auth config.
+- mounts Better Auth's handler on the path Better Auth routes on: the path of `baseURL` (or `BETTER_AUTH_URL`) when it has one, otherwise `basePath` (`/api/auth/*` by default). The `routing.prefix` and `routing.version` options of your app do not apply to it; change the path in your Better Auth config. With `basePath: "/"` the handler is mounted after your controllers, so their routes take precedence and Better Auth answers the rest.
 - registers `AuthService` and `AuthGuard` in the application's DI container.
-- applies CORS for Better Auth's `trustedOrigins` on its routes (see [CORS](#cors)).
+- applies CORS for the origins Better Auth trusts on its routes (see [CORS](#cors)).
 - wires [`@Hook()`](#hook-decorators) and [`@DatabaseHook()`](#database-hook-decorators) services into Better Auth.
 
-Hono hands Better Auth the original Web `Request`, so there is no body parser to disable or configure.
+Hono hands Better Auth the original Web `Request`, so there is no body parser to disable or configure. Middleware that reads the body with Hono's `c.req.json()`/`c.req.text()` before Better Auth is fine: the plugin rebuilds the request from Hono's body cache.
 
 ## Route Protection
 
@@ -417,22 +417,7 @@ export class OrgProjectController {
 
 ### Hook Decorators
 
-> [!IMPORTANT]
-> To use `@Hook`, `@BeforeHook`, `@AfterHook`, set `hooks: {}` (empty object) in your `betterAuth(...)` config. You can still add your own Better Auth hooks; `hooks: {}` (empty object) is just the minimum required.
-
-Minimal Better Auth setup with hooks enabled:
-
-```ts title="auth.ts"
-import { betterAuth } from "better-auth";
-
-export const auth = betterAuth({
-  basePath: "/api/auth",
-  // other better-auth options...
-  hooks: {}, // minimum required to use hooks. read above for more details.
-});
-```
-
-Create hooks as Honest services, so they can inject other services:
+Create [Better Auth hooks](https://www.better-auth.com/docs/concepts/hooks) as Honest services, so they can inject other services. No `hooks` option is needed in your `betterAuth(...)` config; your own `hooks.before`/`hooks.after` keep working alongside them.
 
 ```ts title="hooks/sign-up.hook.ts"
 import { Service } from "@kenzuya/honest";
@@ -471,6 +456,14 @@ export class AppModule {}
 ```
 
 Without a path, `@BeforeHook()` and `@AfterHook()` run for every Better Auth route.
+
+The plugin registers these methods as hooks of a Better Auth plugin, so they behave like any Better Auth hook:
+
+- A `@BeforeHook` can return `{ context: { ... } }` to change the request (for example the body), return a response such as `ctx.json(...)` to answer instead of the endpoint, or throw an `APIError`.
+- An `@AfterHook` can return a value to replace the endpoint's response.
+- They run after the `hooks` option of your config and after the hooks of plugins listed in `plugins`.
+
+If several applications are created with the same Better Auth instance (for example in tests, or on a dev-server reload), the hooks of the latest application replace the earlier ones instead of running twice. The same applies to database hooks.
 
 ### Database Hook Decorators
 
@@ -628,13 +621,13 @@ new BetterAuthPlugin({
 | Option                      | Default     | Description |
 | --------------------------- | ----------- | ----------- |
 | `auth`                      | (required)  | Your Better Auth instance. |
-| `disableTrustedOriginsCors` | `false`     | When `true`, does not apply CORS for `trustedOrigins` on Better Auth routes. |
+| `disableTrustedOriginsCors` | `false`     | When `true`, does not apply CORS for the origins Better Auth trusts on its routes. |
 | `disableControllers`        | `false`     | When `true`, does not mount Better Auth's routes (or their CORS). `AuthService`, `AuthGuard` and hooks keep working. Use this to mount the handler yourself. |
 | `middleware`                | `undefined` | Hono middleware `(c, next)` that runs before Better Auth's handler on its routes. |
 
 ### CORS
 
-If your Better Auth config sets `trustedOrigins`, the plugin applies [`hono/cors`](https://hono.dev/docs/middleware/builtin/cors) to Better Auth routes with `credentials: true`, allowing exactly those origins. `trustedOrigins` can be an array or a function; a function is called with the request.
+The plugin applies [`hono/cors`](https://hono.dev/docs/middleware/builtin/cors) to Better Auth routes with `credentials: true`, allowing the origins Better Auth itself trusts: `trustedOrigins` (including wildcard patterns such as `https://*.example.com` and custom schemes), the origin of `baseURL`, `BETTER_AUTH_TRUSTED_ORIGINS` and origins added by plugins. Matching is done by Better Auth, so CORS and Better Auth's own origin check agree. A `trustedOrigins` function is called with the request, and only when the request has an `Origin` header.
 
 The CORS middleware covers Better Auth routes only. Add your own CORS for the rest of your API, for example a global Honest middleware that wraps Hono's `cors()`. Set `disableTrustedOriginsCors: true` to manage CORS for Better Auth routes yourself.
 
@@ -653,7 +646,7 @@ new BetterAuthPlugin({
 });
 ```
 
-The middleware can also return a response itself to stop the request before it reaches Better Auth. Errors it throws go to the application's `onError` handler.
+The middleware can also return a response itself to stop the request before it reaches Better Auth, and it can read the body through Hono (`c.req.json()`, `c.req.text()`). Errors it throws go to the application's `onError` handler.
 
 ## Migrating from nestjs-better-auth
 
@@ -667,6 +660,7 @@ The middleware can also return a response itself to stop the request before it r
 | `bodyParser`, `disableBodyParser`, `enableRawBodyParser` | Not needed: Hono doesn't pre-parse bodies, use `c.req.raw` for the raw body |
 | GraphQL resolvers and WebSocket gateways           | Not supported (Honest has no GraphQL or WebSocket layer) |
 | Function-based `trustedOrigins` unsupported        | Supported |
+| `hooks: {}` required for `@Hook()` services        | Not needed (`databaseHooks: {}` still is for `@DatabaseHook()`) |
 
 ## Example
 

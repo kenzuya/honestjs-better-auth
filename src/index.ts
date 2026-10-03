@@ -1,7 +1,11 @@
 import "reflect-metadata";
 export * from "./decorators.ts";
-export * from "./auth-service.ts";
-export * from "./auth-guard.ts";
+export { AuthService } from "./auth-service.ts";
+export {
+	AuthGuard,
+	type BaseUserSession,
+	type UserSession,
+} from "./auth-guard.ts";
 export * from "./better-auth-plugin.ts";
 export * from "./symbols.ts";
 export {

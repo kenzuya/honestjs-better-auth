@@ -9,6 +9,4 @@ export const auth = betterAuth({
 		enabled: true,
 	},
 	plugins: [bearer()],
-	// Required for @Hook() services
-	hooks: {},
 });

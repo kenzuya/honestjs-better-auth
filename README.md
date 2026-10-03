@@ -1,164 +1,145 @@
-# NestJS Better Auth Integration
+# Honest Better Auth Integration
 
-A comprehensive NestJS integration library for [Better Auth](https://www.better-auth.com/), providing seamless authentication and authorization for your NestJS applications.
+[Better Auth](https://www.better-auth.com/) for [Honest](https://github.com/kenzuya/honest) (`@kenzuya/honest`), the Nest-style framework on [Hono](https://hono.dev). It mounts Better Auth's routes, guards your controllers with decorators, gives you the session in handlers, and wires Better Auth hooks into Honest's dependency injection.
+
+This package is a port of [`@thallesp/nestjs-better-auth`](https://github.com/ThallesP/nestjs-better-auth) to Honest. See [Migrating from nestjs-better-auth](#migrating-from-nestjs-better-auth) for the differences.
 
 ## Installation
 
-Install the library in your NestJS project:
-
 ```bash
-# Using npm
-npm install @thallesp/nestjs-better-auth
-
-# Using yarn
-yarn add @thallesp/nestjs-better-auth
-
-# Using pnpm
-pnpm add @thallesp/nestjs-better-auth
-
 # Using bun
-bun add @thallesp/nestjs-better-auth
+bun add @kenzuya/honest-better-auth @kenzuya/honest better-auth hono reflect-metadata
+
+# Using npm
+npm install @kenzuya/honest-better-auth @kenzuya/honest better-auth hono reflect-metadata
 ```
 
 ## Prerequisites
 
-> [!IMPORTANT]  
-> Requires `better-auth` >= 1.5.0. Older versions are deprecated and unsupported.
+> [!IMPORTANT]
+> Requires `better-auth` >= 1.5.0 and `@kenzuya/honest` 0.1.x.
 
-Before you start, make sure you have:
-
-- A working NestJS application
+- A working Honest application
 - Better Auth (>= 1.5.0) installed and configured ([installation guide](https://www.better-auth.com/docs/installation))
+- `"experimentalDecorators": true` and `"emitDecoratorMetadata": true` in your `tsconfig.json` (Honest's dependency injection needs them)
 
 ## Basic Setup
 
-**1. Disable Body Parser**
+**1. Create your Better Auth instance**
 
-Disable NestJS's built-in body parser to allow Better Auth to handle the raw request body:
+```ts title="auth.ts"
+import { betterAuth } from "better-auth";
+
+export const auth = betterAuth({
+  basePath: "/api/auth", // the default
+  emailAndPassword: { enabled: true },
+  // database, plugins, ...
+});
+```
+
+**2. Register the plugin and the guard**
+
+Add `BetterAuthPlugin` to the application's plugins and `AuthGuard` to its global guards:
 
 ```ts title="main.ts"
-import { NestFactory } from "@nestjs/core";
+import "reflect-metadata";
+import { Application } from "@kenzuya/honest";
+import { AuthGuard, BetterAuthPlugin } from "@kenzuya/honest-better-auth";
 import { AppModule } from "./app.module";
-
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
-    // The library will re-add the default body parsers for non-auth routes.
-    bodyParser: false,
-  });
-  await app.listen(process.env.PORT ?? 3333);
-}
-bootstrap();
-```
-
-> [!IMPORTANT]
-> **Side Effect:** Since we disable NestJS's built-in body parser, the `rawBody: true` option in `NestFactory.create()` has no effect.
-> If you need access to `req.rawBody` (e.g., for webhook signature verification), use `bodyParser.rawBody` in `AuthModule.forRoot()` instead.
-> See [Module Options](#module-options) for details.
-
-**2. Import AuthModule**
-
-Import the `AuthModule` in your root module:
-
-```ts title="app.module.ts"
-import { Module } from "@nestjs/common";
-import { AuthModule } from "@thallesp/nestjs-better-auth";
 import { auth } from "./auth";
 
-@Module({
-  imports: [
-    AuthModule.forRoot({
-      auth,
-      bodyParser: {
-        json: { limit: "2mb" },
-        urlencoded: { limit: "2mb", extended: true },
-        rawBody: true,
-      },
-    }),
-  ],
-})
-export class AppModule {}
+const { hono } = await Application.create(AppModule, {
+  plugins: [new BetterAuthPlugin({ auth })],
+  components: { guards: [AuthGuard] },
+});
+
+export default hono;
 ```
 
-Both `bodyParser.json` and `bodyParser.urlencoded` accept parser options plus an `enabled` flag if you want to disable either parser individually. Set `bodyParser.rawBody` to `true` if you also want Nest-style `req.rawBody` support.
+The plugin:
 
-On Fastify, `bodyParser.urlencoded` with `extended: true` uses the optional peer dependency `qs`. Install `qs` in your application if you want nested URL-encoded parsing there.
+- mounts Better Auth's handler on its `basePath` (`/api/auth/*` by default). The `routing.prefix` and `routing.version` options of your app do not apply to it; change the path through `basePath` in your Better Auth config.
+- registers `AuthService` and `AuthGuard` in the application's DI container.
+- applies CORS for Better Auth's `trustedOrigins` on its routes (see [CORS](#cors)).
+- wires [`@Hook()`](#hook-decorators) and [`@DatabaseHook()`](#database-hook-decorators) services into Better Auth.
 
-If you configure `trustedOrigins`, this module also applies Better Auth CORS headers for auth routes. On Fastify, Better Auth routes are mounted through middleware, so app-level `@fastify/cors` does not fully cover them by itself.
+Hono hands Better Auth the original Web `Request`, so there is no body parser to disable or configure.
 
 ## Route Protection
 
-**Global by default**: An `AuthGuard` is registered globally by this module. All routes are protected unless you explicitly allow access with `@AllowAnonymous()` or mark them as optional with `@OptionalAuth()`.
+With `AuthGuard` in `components.guards`, every route requires a session unless you allow anonymous access with `@AllowAnonymous()` or make authentication optional with `@OptionalAuth()`. Requests without a session get `401 Unauthorized`; failed role or permission checks get `403 Forbidden`.
 
-GraphQL is supported and works the same way as REST: the global guard applies to resolvers too, and you can use `@AllowAnonymous()`/`@OptionalAuth()` on queries and mutations.
+To protect only some controllers, leave `AuthGuard` out of the global guards and apply it with `@UseGuards()`:
 
-WebSocket is also supported and works in the same way as REST and GraphQL: you can use `@AllowAnonymous()`/`@OptionalAuth()` on any connections, but you must set the AuthGuard for all of them, either at the Gateway or Message level, like so:
+```ts title="users.controller.ts"
+import { Controller, Get, UseGuards } from "@kenzuya/honest";
+import { AuthGuard } from "@kenzuya/honest-better-auth";
 
-```ts
-import { SubscribeMessage, WebSocketGateway } from "@nestjs/websockets";
-import { UseGuards } from "@nestjs/common";
-import { AuthGuard } from '@thallesp/nestjs-better-auth';
-
-@WebSocketGateway({
-	path: "/ws",
-	namespace: "test",
-	cors: {
-		origin: "*",
-	},
-})
 @UseGuards(AuthGuard)
-export class TestGateway { /* ... */ }
+@Controller("users")
+export class UsersController {
+  @Get("me")
+  getProfile() {
+    return { message: "Protected route" };
+  }
+}
 ```
 
-Check the [test gateway](./tests/shared/test-gateway.ts) for a full example.
+The plugin must be registered either way, because the guard gets the Better Auth instance from it.
 
 ## Decorators
-
-Better Auth provides several decorators to enhance your authentication setup:
 
 ### Session Decorator
 
 Access the user session in your controllers:
 
-```ts title="user.controller.ts"
-import { Controller, Get } from "@nestjs/common";
-import { Session, UserSession } from "@thallesp/nestjs-better-auth";
+```ts title="users.controller.ts"
+import { Controller, Get } from "@kenzuya/honest";
+import { Session, type UserSession } from "@kenzuya/honest-better-auth";
 
 @Controller("users")
-export class UserController {
+export class UsersController {
   @Get("me")
-  async getProfile(@Session() session: UserSession) {
+  getProfile(@Session() session: UserSession) {
     return session;
   }
 }
 ```
 
+Pass your auth type for plugin fields: `UserSession<typeof auth>` types fields added by plugins such as `username` or `admin`.
+
 ### AllowAnonymous and OptionalAuth Decorators
 
 Control authentication requirements for specific routes:
 
-```ts title="app.controller.ts"
-import { Controller, Get } from "@nestjs/common";
-import { AllowAnonymous, OptionalAuth } from "@thallesp/nestjs-better-auth";
+```ts title="users.controller.ts"
+import { Controller, Get } from "@kenzuya/honest";
+import {
+  AllowAnonymous,
+  OptionalAuth,
+  Session,
+  type UserSession,
+} from "@kenzuya/honest-better-auth";
 
 @Controller("users")
-export class UserController {
+export class UsersController {
   @Get("public")
   @AllowAnonymous() // Allow anonymous access (no authentication required)
-  async publicRoute() {
+  publicRoute() {
     return { message: "This route is public" };
   }
 
   @Get("optional")
   @OptionalAuth() // Authentication is optional for this route
-  async optionalRoute(@Session() session: UserSession) {
+  optionalRoute(@Session() session: UserSession | null) {
     return { authenticated: !!session, session };
   }
 }
 ```
 
-Alternatively, use as a class decorator for an entire controller:
+Alternatively, use them as class decorators for an entire controller:
 
-```ts title="app.controller.ts"
+```ts title="public.controller.ts"
 @AllowAnonymous() // All routes inside this controller are public
 @Controller("public")
 export class PublicController {
@@ -171,6 +152,8 @@ export class OptionalController {
   /* */
 }
 ```
+
+A decorator on a route overrides the same decorator on its controller.
 
 ### Role-Based Access Control
 
@@ -190,8 +173,8 @@ This library provides two role decorators for different use cases:
 Use `@Roles()` for system-wide admin protection. This checks only the `user.role` field from Better Auth's [admin plugin](https://www.better-auth.com/docs/plugins/admin).
 
 ```ts title="admin.controller.ts"
-import { Controller, Get } from "@nestjs/common";
-import { Roles } from "@thallesp/nestjs-better-auth";
+import { Controller, Get } from "@kenzuya/honest";
+import { Roles } from "@kenzuya/honest-better-auth";
 
 @Controller("admin")
 export class AdminController {
@@ -217,12 +200,12 @@ export class AdminController {
 Use `@RequireActiveOrg()` when a route or controller only needs an active organization context. This requires authentication and `session.activeOrganizationId`, but does not require any specific organization role.
 
 ```ts title="projects.controller.ts"
-import { Controller, Get } from "@nestjs/common";
+import { Controller, Get } from "@kenzuya/honest";
 import {
   RequireActiveOrg,
   Session,
   UserSession,
-} from "@thallesp/nestjs-better-auth";
+} from "@kenzuya/honest-better-auth";
 
 @RequireActiveOrg()
 @Controller("projects")
@@ -241,8 +224,8 @@ Use this when the controller only needs an active organization ID for scoping da
 Use `@OrgRoles()` for organization-scoped protection when you want to require an active organization and one of the specified organization member roles.
 
 ```ts title="org.controller.ts"
-import { Controller, Get } from "@nestjs/common";
-import { OrgRoles, Session, UserSession } from "@thallesp/nestjs-better-auth";
+import { Controller, Get } from "@kenzuya/honest";
+import { OrgRoles, Session, UserSession } from "@kenzuya/honest-better-auth";
 
 @Controller("org")
 export class OrgController {
@@ -298,7 +281,7 @@ const editor = ac.newRole({
   project: ["create", "update"],
 });
 
-const admin = ac.newRole({
+const adminRole = ac.newRole({
   project: ["create", "update", "delete"],
   sale: ["create", "read", "update", "delete"],
 });
@@ -309,7 +292,7 @@ export const auth = betterAuth({
       ac,
       roles: {
         editor,
-        admin,
+        admin: adminRole,
       },
     }),
   ],
@@ -319,8 +302,8 @@ export const auth = betterAuth({
 **Usage:**
 
 ```ts title="project.controller.ts"
-import { Controller, Get, Post } from "@nestjs/common";
-import { UserHasPermission } from "@thallesp/nestjs-better-auth";
+import { Controller, Get, Post } from "@kenzuya/honest";
+import { UserHasPermission } from "@kenzuya/honest-better-auth";
 
 @Controller("projects")
 export class ProjectController {
@@ -341,6 +324,11 @@ export class ProjectController {
   @UserHasPermission({
     permissions: { project: ["create"], sale: ["create"] },
   })
+  @Post("sales")
+  async createSale() {
+    // Requires both project: ["create"] and sale: ["create"]
+    return { message: "Sale created" };
+  }
 }
 ```
 
@@ -397,8 +385,8 @@ export const auth = betterAuth({
 **Usage:**
 
 ```ts title="org-project.controller.ts"
-import { Controller, Get, Post } from "@nestjs/common";
-import { MemberHasPermission, Session, UserSession } from "@thallesp/nestjs-better-auth";
+import { Controller, Get, Post } from "@kenzuya/honest";
+import { MemberHasPermission, Session, UserSession } from "@kenzuya/honest-better-auth";
 
 @Controller("org/projects")
 export class OrgProjectController {
@@ -444,19 +432,19 @@ export const auth = betterAuth({
 });
 ```
 
-Create custom hooks that integrate with NestJS's dependency injection:
+Create hooks as Honest services, so they can inject other services:
 
 ```ts title="hooks/sign-up.hook.ts"
-import { Injectable } from "@nestjs/common";
+import { Service } from "@kenzuya/honest";
 import {
   BeforeHook,
   Hook,
-  AuthHookContext,
-} from "@thallesp/nestjs-better-auth";
+  type AuthHookContext,
+} from "@kenzuya/honest-better-auth";
 import { SignUpService } from "./sign-up.service";
 
 @Hook()
-@Injectable()
+@Service()
 export class SignUpHook {
   constructor(private readonly signUpService: SignUpService) {}
 
@@ -469,21 +457,20 @@ export class SignUpHook {
 }
 ```
 
-Register your hooks in a module:
+List your hooks in a module's `services`. The plugin wires the hook services that the application has instantiated:
 
 ```ts title="app.module.ts"
-import { Module } from "@nestjs/common";
-import { AuthModule } from "@thallesp/nestjs-better-auth";
+import { Module } from "@kenzuya/honest";
 import { SignUpHook } from "./hooks/sign-up.hook";
-import { SignUpService } from "./sign-up.service";
-import { auth } from "./auth";
+import { SignUpService } from "./hooks/sign-up.service";
 
 @Module({
-  imports: [AuthModule.forRoot({ auth })],
-  providers: [SignUpHook, SignUpService],
+  services: [SignUpHook, SignUpService],
 })
 export class AppModule {}
 ```
+
+Without a path, `@BeforeHook()` and `@AfterHook()` run for every Better Auth route.
 
 ### Database Hook Decorators
 
@@ -503,19 +490,19 @@ export const auth = betterAuth({
 });
 ```
 
-Create database hooks that integrate with NestJS's dependency injection:
+Create database hooks as Honest services:
 
 ```ts title="hooks/user-create.hook.ts"
-import { Injectable } from "@nestjs/common";
+import { Service } from "@kenzuya/honest";
 import {
-  DatabaseHook,
-  BeforeCreate,
   AfterCreate,
-} from "@thallesp/nestjs-better-auth";
+  BeforeCreate,
+  DatabaseHook,
+} from "@kenzuya/honest-better-auth";
 import { EmailService } from "./email.service";
 
 @DatabaseHook()
-@Injectable()
+@Service()
 export class UserCreateHook {
   constructor(private readonly emailService: EmailService) {}
 
@@ -540,15 +527,12 @@ export class UserCreateHook {
 Register your database hooks in a module:
 
 ```ts title="app.module.ts"
-import { Module } from "@nestjs/common";
-import { AuthModule } from "@thallesp/nestjs-better-auth";
+import { Module } from "@kenzuya/honest";
 import { UserCreateHook } from "./hooks/user-create.hook";
-import { EmailService } from "./email.service";
-import { auth } from "./auth";
+import { EmailService } from "./hooks/email.service";
 
 @Module({
-  imports: [AuthModule.forRoot({ auth })],
-  providers: [UserCreateHook, EmailService],
+  services: [UserCreateHook, EmailService],
 })
 export class AppModule {}
 ```
@@ -570,185 +554,120 @@ Where `model` is one of: `"user"`, `"session"`, `"account"`, `"verification"`.
 
 ## AuthService
 
-The `AuthService` is automatically provided by the `AuthModule` and can be injected into your controllers to access the Better Auth instance and its API endpoints.
+The plugin registers `AuthService` in the DI container. Inject it into controllers and services to use the Better Auth instance and its API endpoints:
 
 ```ts title="users.controller.ts"
-import { Controller, Get, Post, Request, Body } from "@nestjs/common";
-import { AuthService } from "@thallesp/nestjs-better-auth";
-import { fromNodeHeaders } from "better-auth/node";
-import type { Request as ExpressRequest } from "express";
-import { auth } from "../auth";
+import { Body, Controller, Get, Post, Req } from "@kenzuya/honest";
+import { AuthService } from "@kenzuya/honest-better-auth";
+import type { HonoRequest } from "hono";
+import type { auth } from "../auth";
 
 @Controller("users")
 export class UsersController {
-  constructor(private authService: AuthService<typeof auth>) {}
+  constructor(private readonly authService: AuthService<typeof auth>) {}
 
   @Get("accounts")
-  async getAccounts(@Request() req: ExpressRequest) {
+  async getAccounts(@Req() req: HonoRequest) {
     // Pass the request headers to the auth API
     const accounts = await this.authService.api.listUserAccounts({
-      headers: fromNodeHeaders(req.headers),
+      headers: req.raw.headers,
     });
 
     return { accounts };
   }
 
   @Post("api-keys")
-  async createApiKey(@Request() req: ExpressRequest, @Body() body) {
+  async createApiKey(@Req() req: HonoRequest, @Body() body) {
     // Access plugin-specific functionality with request headers
     // createApiKey is a method added by a plugin, not part of the core API
     return this.authService.api.createApiKey({
-      ...body,
-      headers: fromNodeHeaders(req.headers),
+      body,
+      headers: req.raw.headers,
     });
   }
 }
 ```
 
-When using plugins that extend the Auth type with additional functionality, use generics to access the extended features as shown above with `AuthService<typeof auth>`. This ensures type safety when using plugin-specific API methods like `createApiKey`.
+When using plugins that extend the Auth type with additional functionality, use generics to access the extended features as shown above with `AuthService<typeof auth>`. This ensures type safety when using plugin-specific API methods like `createApiKey`. `authService.instance` returns the whole Better Auth instance.
 
-## Request Object Access
+## Context Variables
 
-You can access the session and user through the request object:
+`AuthGuard` stores what it resolved in Hono context variables, available to handlers, later guards, pipes and filters:
+
+| Variable  | Value                                                    |
+| --------- | -------------------------------------------------------- |
+| `session` | The full session (`{ session, user }`), or `null`        |
+| `user`    | The session's user, or `null` (useful for observability tools like Sentry) |
 
 ```ts
-import { Controller, Get, Request } from "@nestjs/common";
-import type { Request as ExpressRequest } from "express";
+import { Controller, Ctx, Get, Var } from "@kenzuya/honest";
+import type { Context } from "hono";
 
 @Controller("users")
-export class UserController {
+export class UsersController {
   @Get("me")
-  async getProfile(@Request() req: ExpressRequest) {
-    return {
-      session: req.session, // Session is attached to the request
-      user: req.user, // User object is attached to the request
-    };
+  getProfile(@Var("user") user: unknown, @Ctx() c: Context) {
+    return { user, session: c.get("session") };
   }
 }
 ```
 
-The request object provides:
+The variable names are exported as `SESSION_CONTEXT_KEY` and `USER_CONTEXT_KEY`.
 
-- `req.session`: The full session object containing user data and authentication state
-- `req.user`: A direct reference to the user object from the session (useful for observability tools like Sentry)
+## Plugin Options
 
-### Advanced: Disable the global AuthGuard
-
-If you prefer to manage guards yourself, you can disable the global guard and then apply `@UseGuards(AuthGuard)` per controller/route or register it via `APP_GUARD`.
-
-```ts title="app.module.ts"
-import { Module } from "@nestjs/common";
-import { AuthModule } from "@thallesp/nestjs-better-auth";
-import { auth } from "./auth";
-
-@Module({
-  imports: [
-    AuthModule.forRoot({
-      auth,
-      disableGlobalAuthGuard: true,
-    }),
-  ],
-})
-export class AppModule {}
-```
-
-```ts title="app.controller.ts"
-import { Controller, Get, UseGuards } from "@nestjs/common";
-import { AuthGuard } from "@thallesp/nestjs-better-auth";
-
-@Controller("users")
-@UseGuards(AuthGuard)
-export class UserController {
-  @Get("me")
-  async getProfile() {
-    return { message: "Protected route" };
-  }
-}
-```
-
-## Module Options
-
-When configuring `AuthModule.forRoot()`, you can provide options to customize the behavior:
-
-```typescript
-AuthModule.forRoot({
+```ts
+new BetterAuthPlugin({
   auth,
   disableTrustedOriginsCors: false,
-  bodyParser: {
-    json: { enabled: true },
-    urlencoded: { enabled: true, extended: true },
-    rawBody: false,
-  },
-  disableBodyParser: false,
-  enableRawBodyParser: false,
-  disableGlobalAuthGuard: false,
   disableControllers: false,
+  middleware: undefined,
 });
 ```
 
-The available options are:
+| Option                      | Default     | Description |
+| --------------------------- | ----------- | ----------- |
+| `auth`                      | (required)  | Your Better Auth instance. |
+| `disableTrustedOriginsCors` | `false`     | When `true`, does not apply CORS for `trustedOrigins` on Better Auth routes. |
+| `disableControllers`        | `false`     | When `true`, does not mount Better Auth's routes (or their CORS). `AuthService`, `AuthGuard` and hooks keep working. Use this to mount the handler yourself. |
+| `middleware`                | `undefined` | Hono middleware `(c, next)` that runs before Better Auth's handler on its routes. |
 
-| Option                      | Default | Description                                                                                                                                                              |
-| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `disableTrustedOriginsCors` | `false` | When set to `true`, disables the automatic CORS configuration for the origins specified in `trustedOrigins`. On Fastify, use this only if you want to fully manage Better Auth route CORS yourself. |
-| `bodyParser`                | Re-adds JSON and URL-encoded body parsers | Configure the body parsers re-added by the module after Nest body parsing is disabled. `json` and `urlencoded` accept the parser options object plus `enabled?: boolean`, and `rawBody?: boolean` enables `req.rawBody`. |
-| `disableBodyParser`         | `false` | Deprecated. Use `bodyParser.json.enabled` and `bodyParser.urlencoded.enabled` instead. When set to `true`, disables both parsers unless you explicitly re-enable one in `bodyParser`. |
-| `enableRawBodyParser`       | `false` | Deprecated. Use `bodyParser.rawBody` instead. When set to `true`, enables raw body parsing and attaches the raw buffer to `req.rawBody`. |
-| `disableGlobalAuthGuard`    | `false` | When set to `true`, does not register `AuthGuard` as a global guard. Use this if you prefer to apply `AuthGuard` manually or register it yourself via `APP_GUARD`.       |
-| `disableControllers`        | `false` | When set to `true`, does not register any controllers. Use this if you want to handle routes manually.                                                                   |
-| `middleware`                | `undefined` | Optional middleware function that wraps the Better Auth handler. Receives `(req, res, next)` parameters. Useful for integrating with request-scoped libraries like MikroORM's RequestContext. |
+### CORS
 
-### Body Parser Configuration
+If your Better Auth config sets `trustedOrigins`, the plugin applies [`hono/cors`](https://hono.dev/docs/middleware/builtin/cors) to Better Auth routes with `credentials: true`, allowing exactly those origins. `trustedOrigins` can be an array or a function; a function is called with the request.
 
-Use `bodyParser` to customize the parsers that this library re-adds after you disable Nest's built-in body parser:
-
-```ts
-AuthModule.forRoot({
-  auth,
-  bodyParser: {
-    json: {
-      limit: "2mb",
-    },
-    urlencoded: {
-      enabled: true,
-      extended: true,
-      limit: "2mb",
-    },
-    rawBody: true,
-  },
-});
-```
-
-`bodyParser.rawBody` enables `req.rawBody` support, while `bodyParser.json` and `bodyParser.urlencoded` configure the corresponding parser behavior for the active adapter.
-
-If you use Fastify with `bodyParser.urlencoded({ extended: true })`, install the optional peer dependency `qs` to enable nested form parsing.
-
-### CORS on Fastify
-
-If your Better Auth config sets `trustedOrigins`, this module applies CORS to Better Auth routes automatically.
-
-On Fastify, Better Auth routes are served through middleware internally. Because of that:
-
-- app-level `@fastify/cors` does not fully apply to Better Auth routes on its own
-- this module applies Better Auth route CORS from `trustedOrigins`
-
-This Fastify fallback only supports array-based `trustedOrigins`. Function-based `trustedOrigins` remain unsupported unless you set `disableTrustedOriginsCors: true` and manage Better Auth route CORS manually.
-
-Set `disableTrustedOriginsCors: true` only if you want to fully manage Better Auth route CORS yourself.
+The CORS middleware covers Better Auth routes only. Add your own CORS for the rest of your API, for example a global Honest middleware that wraps Hono's `cors()`. Set `disableTrustedOriginsCors: true` to manage CORS for Better Auth routes yourself.
 
 ### Using Custom Middleware
 
-You can provide a custom middleware function that wraps the Better Auth handler. This is particularly useful when integrating with libraries like MikroORM that require request context:
+`middleware` runs before Better Auth's handler, for example to set up request-scoped state:
 
-```typescript
-import { RequestContext } from '@mikro-orm/core';
-
-AuthModule.forRoot({
+```ts
+new BetterAuthPlugin({
   auth,
-  middleware: (req, res, next) => {
-    RequestContext.create(orm.em, next);
+  middleware: async (c, next) => {
+    const startedAt = Date.now();
+    await next();
+    console.log(`${c.req.method} ${c.req.path} took ${Date.now() - startedAt}ms`);
   },
 });
 ```
 
-The middleware receives standard Express middleware parameters `(req, res, next)` where `next` is a function that invokes the Better Auth handler.
+The middleware can also return a response itself to stop the request before it reaches Better Auth. Errors it throws go to the application's `onError` handler.
+
+## Migrating from nestjs-better-auth
+
+| NestJS (`@thallesp/nestjs-better-auth`)           | Honest (`@kenzuya/honest-better-auth`) |
+| ------------------------------------------------- | -------------------------------------- |
+| `AuthModule.forRoot({ auth })` / `forRootAsync()` | `plugins: [new BetterAuthPlugin({ auth })]` |
+| Global `AuthGuard` by default, `disableGlobalAuthGuard` | `components: { guards: [AuthGuard] }` or `@UseGuards(AuthGuard)` |
+| `@Injectable()` hook providers in `providers`      | `@Service()` hook classes in `services` |
+| `req.session` / `req.user`                         | `@Session()`, `@Var("user")` or `c.get("session")` |
+| `middleware: (req, res, next) => ...`              | `middleware: async (c, next) => ...` (Hono) |
+| `bodyParser`, `disableBodyParser`, `enableRawBodyParser` | Not needed: Hono doesn't pre-parse bodies, use `c.req.raw` for the raw body |
+| GraphQL resolvers and WebSocket gateways           | Not supported (Honest has no GraphQL or WebSocket layer) |
+| Function-based `trustedOrigins` unsupported        | Supported |
+
+## Example
+
+[`examples/basic`](./examples/basic) is a small notes API using the plugin, the global guard, `@Session()` and a sign-up hook.

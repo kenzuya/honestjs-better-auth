@@ -115,7 +115,8 @@ if [[ "$MODE" == "dry-run" ]]; then
 
 	echo "+++ :npm: npm publish --dry-run"
 	git --no-pager diff -- package.json
-	npm publish --dry-run --tag "$DIST_TAG"
+	# The build above already ran; --ignore-scripts skips the second one in prepack
+	npm publish --dry-run --ignore-scripts --tag "$DIST_TAG"
 
 	annotate info "Dry run OK: would publish \`${PACKAGE_NAME}@${VERSION}\` with dist-tag \`${DIST_TAG}\` and push tag \`${TAG}\` to \`${BRANCH}\`."
 	exit 0
@@ -157,6 +158,7 @@ echo "--- :package: Build"
 bun run build
 
 echo "+++ :npm: Publish ${PACKAGE_NAME}@${VERSION}"
-npm publish --tag "$DIST_TAG"
+# The build above already ran; --ignore-scripts skips the second one in prepack
+npm publish --ignore-scripts --tag "$DIST_TAG"
 
 annotate success "Published [\`${PACKAGE_NAME}@${VERSION}\`](https://www.npmjs.com/package/${PACKAGE_NAME}/v/${VERSION}) with dist-tag \`${DIST_TAG}\` and pushed tag \`${TAG}\`."
